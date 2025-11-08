@@ -1,15 +1,32 @@
 xiaozhi:
   websocket_url: "wss://api.xiaozhi.me/mcp/"
-  token: "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjYxOTY1NiwiYWdlbnRJZCI6OTg0OTAyLCJlbmRwb2ludElkIjoiYWdlbnRfOTg0OTAyIiwicHVycG9zZSI6Im1jcC1lbmRwb2ludCIsImlhdCI6MTc2MjQ3NDYzNiwiZXhwIjoxNzk0MDMyMjM2fQ.yRc_5AuudF4n5a8KlVDW3vyocOvDhA6yn1NWDFPESD8FpkDtan9mB3yHCMtEQJlIveZ-yFNpesu6tq3-2O3c-w"
+  token: "seu_token_aqui"
 
+# Configuração multi-MCP: múltiplos servidores MCP agregados
+# Se esta seção existir, será usada em vez de mcp_local
+mcp_servers:
+  # Servidor SQL DW (remoto via SSH)
+  - name: "sql-dw"
+    ssh_host: "seu_servidor_ssh"
+    ssh_user: "usuario"
+    ssh_port: 22
+    # ssh_password: deixe vazio - será lido da variável de ambiente SSH_PASSWORD
+    ssh_command: "/caminho/para/run_mcp.sh"
+  
+  # Servidor Portal da Transparência (local)
+  - name: "portal-transparencia"
+    local_command: "node mcp_portal_transparencia/server.js"
+    # API Key será lida de PORTAL_API_KEY ou usar padrão do código
+
+# Configuração legada (mantida para compatibilidade)
+# Se mcp_servers não estiver definido, usa esta configuração
 mcp_local:
-  ssh_host: "100.124.250.21"
-  ssh_user: "allied"
-  ssh_port: 4422
+  ssh_host: "seu_servidor_ssh"
+  ssh_user: "usuario"
+  ssh_port: 22
   # ssh_password: deixe vazio ou remova - será lido da variável de ambiente SSH_PASSWORD
-  ssh_command: "/home/allied/AlliedIT_DW/mcp_server/run_mcp.sh"
+  ssh_command: "/caminho/para/run_mcp.sh"
   
 logging:
   level: "INFO"
   file: "bridge.log"
-

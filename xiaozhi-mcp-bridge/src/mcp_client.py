@@ -4,6 +4,7 @@ Cliente MCP para conectar ao servidor MCP local via SSH/STDIO
 import asyncio
 import logging
 import subprocess
+import os
 from typing import Optional, Callable, Dict, Any
 from message_handler import MessageHandler
 import paramiko
@@ -122,22 +123,47 @@ class MCPClient:
     async def _connect_with_subprocess(self) -> bool:
         """Conecta usando subprocess (quando não tem senha)"""
         try:
-            # Construir comando SSH
-            ssh_cmd = [
-                "ssh",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-p", str(self.ssh_port),
-                f"{self.ssh_user}@{self.ssh_host}",
-                self.ssh_command
-            ]
+            # Se for localhost, executar comando diretamente (sem SSH)
+            if self.ssh_host == "localhost" or self.ssh_host == "127.0.0.1":
+                import platform
+                import shlex
+                if platform.system() == 'Windows':
+                    # Windows: dividir comando em partes e executar
+                    # Se contém caminho relativo, já está no cwd correto
+                    parts = shlex.split(self.ssh_command, posix=False)
+                    cmd = parts
+                else:
+                    # Unix: executar via shell
+                    cmd = ["/bin/bash", "-c", self.ssh_command]
+                
+                logger.info("Executando comando local: %s", self.ssh_command)
+            else:
+                # Construir comando SSH para servidor remoto
+                ssh_cmd = [
+                    "ssh",
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null",
+                    "-p", str(self.ssh_port),
+                    f"{self.ssh_user}@{self.ssh_host}",
+                    self.ssh_command
+                ]
+                cmd = ssh_cmd
             
             # Criar processo assíncrono
+            # Para comandos locais, definir diretório de trabalho como raiz do projeto
+            cwd = None
+            if self.ssh_host == "localhost" or self.ssh_host == "127.0.0.1":
+                # Obter diretório raiz do projeto (2 níveis acima de src/)
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                project_root = os.path.dirname(os.path.dirname(script_dir))
+                cwd = project_root
+            
             self.process = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd
             )
             
             # Verificar se processo foi criado corretamente

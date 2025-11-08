@@ -17,6 +17,14 @@ mcp_servers:
   - name: "portal-transparencia"
     local_command: "node mcp_portal_transparencia/server.js"
     # API Key será lida de PORTAL_API_KEY ou usar padrão do código
+  
+  # Servidor MCP HTTP/HTTPS (exemplo: ApeRAG)
+  - name: "aperag-mcp"
+    url: "https://rag.apecloud.com/mcp/"
+    api_key: "sua-api-key-aqui"
+    headers:
+      Authorization: "Bearer sua-api-key-aqui"
+    # Headers adicionais podem ser adicionados aqui
 
 # Configuração legada (mantida para compatibilidade)
 # Se mcp_servers não estiver definido, usa esta configuração

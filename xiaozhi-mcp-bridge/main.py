@@ -96,8 +96,19 @@ def main():
                 logger.error("Configuração 'name' não encontrada para servidor MCP")
                 sys.exit(1)
             
-            # Determinar tipo de conexão (SSH ou local)
-            if mcp_config.get('ssh_host'):
+            # Determinar tipo de conexão (HTTP, SSH ou local)
+            if mcp_config.get('url'):
+                # Servidor HTTP/HTTPS
+                api_key = mcp_config.get('api_key', '')
+                headers = mcp_config.get('headers', {})
+                
+                mcp_servers.append({
+                    'name': mcp_config['name'],
+                    'url': mcp_config['url'],
+                    'api_key': api_key,
+                    'headers': headers
+                })
+            elif mcp_config.get('ssh_host'):
                 # Servidor remoto via SSH
                 ssh_port = mcp_config.get('ssh_port', 22)
                 ssh_password = os.environ.get('SSH_PASSWORD') or mcp_config.get('ssh_password')
@@ -131,7 +142,7 @@ def main():
                     'ssh_password': None
                 })
             else:
-                logger.error("Servidor MCP '%s' deve ter 'ssh_host' ou 'local_command'", mcp_config.get('name'))
+                logger.error("Servidor MCP '%s' deve ter 'url', 'ssh_host' ou 'local_command'", mcp_config.get('name'))
                 sys.exit(1)
         
         bridge = MultiMCPBridge(

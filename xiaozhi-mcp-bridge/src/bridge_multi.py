@@ -3,9 +3,10 @@ Bridge Multi-MCP que agrega ferramentas de múltiplos servidores MCP
 """
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from websocket_client import WebSocketClient
 from mcp_client import MCPClient
+from mcp_client_http import MCPClientHTTP
 from message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
@@ -16,19 +17,31 @@ class MultiMCPBridge:
     
     def __init__(self, ws_url: str, ws_token: str, mcp_servers: List[Dict[str, Any]]):
         self.ws_client = WebSocketClient(ws_url, ws_token)
-        self.mcp_clients: List[MCPClient] = []
+        self.mcp_clients: List[Union[MCPClient, MCPClientHTTP]] = []
         self.message_handler = MessageHandler()
         self.running = False
         
         # Criar clientes MCP para cada servidor
         for mcp_config in mcp_servers:
-            client = MCPClient(
-                ssh_host=mcp_config.get('ssh_host', 'localhost'),
-                ssh_user=mcp_config.get('ssh_user', 'user'),
-                ssh_command=mcp_config.get('ssh_command', ''),
-                ssh_port=mcp_config.get('ssh_port', 22),
-                ssh_password=mcp_config.get('ssh_password')
-            )
+            # Verificar se é servidor HTTP
+            if mcp_config.get('url'):
+                # Servidor HTTP/HTTPS
+                headers = mcp_config.get('headers', {})
+                api_key = mcp_config.get('api_key', '')
+                client = MCPClientHTTP(
+                    url=mcp_config['url'],
+                    api_key=api_key,
+                    headers=headers
+                )
+            else:
+                # Servidor SSH/STDIO (padrão)
+                client = MCPClient(
+                    ssh_host=mcp_config.get('ssh_host', 'localhost'),
+                    ssh_user=mcp_config.get('ssh_user', 'user'),
+                    ssh_command=mcp_config.get('ssh_command', ''),
+                    ssh_port=mcp_config.get('ssh_port', 22),
+                    ssh_password=mcp_config.get('ssh_password')
+                )
             client.server_name = mcp_config.get('name', 'unknown')
             self.mcp_clients.append(client)
         
@@ -187,8 +200,8 @@ class MultiMCPBridge:
                         for tool in tools:
                             tool_name = tool.get("name", "")
                             # Só adicionar prefixo se não tiver já
-                            if not tool_name.startswith("portal_") and not tool_name.startswith("sql_"):
-                                tool["name"] = f"{server_name.lower()}_{tool_name}"
+                            if not tool_name.startswith("portal_") and not tool_name.startswith("sql_") and not tool_name.startswith("aperag_"):
+                                tool["name"] = f"{server_name.lower().replace('-', '_')}_{tool_name}"
                         all_tools.extend(tools)
                         logger.info("✅ Recebidas %d ferramentas de %s", len(tools), server_name)
                     else:
@@ -245,6 +258,13 @@ class MultiMCPBridge:
                         if 'portal' in server_name or 'transparencia' in server_name:
                             client_idx = idx
                             break
+                elif tool_name.startswith("aperag_") or tool_name.startswith("aperag-mcp_"):
+                    # Ferramentas do ApeRAG
+                    for idx, client in enumerate(self.mcp_clients):
+                        server_name = getattr(client, 'server_name', '').lower()
+                        if 'aperag' in server_name:
+                            client_idx = idx
+                            break
                 elif tool_name.startswith("sql_") or any(tool_name.startswith(prefix) for prefix in ["list_tables", "execute_select", "count_records", "get_table_sample", "describe_table", "list_schemas"]):
                     # Ferramentas SQL/DW (sem prefixo)
                     for idx, client in enumerate(self.mcp_clients):
@@ -285,7 +305,10 @@ class MultiMCPBridge:
             local_message["id"] = local_id
             
             # Remover prefixo do nome da ferramenta se necessário
-            if tool_name.startswith(f"{server_name.lower()}_"):
+            server_name_normalized = server_name.lower().replace('-', '_')
+            if tool_name.startswith(f"{server_name_normalized}_"):
+                local_message["params"]["name"] = tool_name[len(f"{server_name_normalized}_"):]
+            elif tool_name.startswith(f"{server_name.lower()}_"):
                 local_message["params"]["name"] = tool_name[len(f"{server_name.lower()}_"):]
             
             logger.debug("Roteando tools/call para %s: %s (cloud_id=%s -> local_id=%s)",

@@ -10,10 +10,22 @@ if ($existing) {
     exit
 }
 
-# Verificar variável de ambiente
-if (-not $env:SSH_PASSWORD) {
-    Write-Host "AVISO: Variável SSH_PASSWORD não configurada!" -ForegroundColor Yellow
-    Write-Host "Configure com: `$env:SSH_PASSWORD = 'sua_senha'" -ForegroundColor Yellow
+# Verificar variável de ambiente ou arquivo .env
+$sshPasswordSet = $false
+if ($env:SSH_PASSWORD) {
+    $sshPasswordSet = $true
+} elseif (Test-Path ".env") {
+    $envContent = Get-Content ".env" -Raw
+    if ($envContent -match "SSH_PASSWORD\s*=\s*(.+)") {
+        $sshPasswordSet = $true
+    }
+}
+
+if (-not $sshPasswordSet) {
+    Write-Host "AVISO: SSH_PASSWORD não configurada (nem em variável de ambiente nem em .env)!" -ForegroundColor Yellow
+    Write-Host "Configure em .env ou com: `$env:SSH_PASSWORD = 'sua_senha'" -ForegroundColor Yellow
+} else {
+    Write-Host "SSH_PASSWORD configurada (carregada do .env ou variável de ambiente)" -ForegroundColor Green
 }
 
 # Iniciar em background

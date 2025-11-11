@@ -185,7 +185,8 @@ class MCPClientHTTP:
                     json=message,
                     headers=request_headers
                 ) as response:
-                    if response.status != 200:
+                    # Aceitar códigos 2xx como sucesso (200 OK, 202 Accepted, etc)
+                    if response.status < 200 or response.status >= 300:
                         error_text = await response.text()
                         logger.error("Erro HTTP %d: %s", response.status, error_text)
                         if future:
@@ -193,6 +194,10 @@ class MCPClientHTTP:
                             if request_id in self._pending_requests:
                                 del self._pending_requests[request_id]
                         return None
+                    
+                    # Log para debug se for 202 (Accepted)
+                    if response.status == 202:
+                        logger.debug("Resposta HTTP 202 (Accepted) - requisição aceita e sendo processada")
                     
                     # Verificar tipo de conteúdo
                     content_type = response.headers.get('Content-Type', '').lower()

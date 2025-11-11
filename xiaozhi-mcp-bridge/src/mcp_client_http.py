@@ -18,6 +18,12 @@ class MCPClientHTTP:
         self.url = url.rstrip('/')  # Remover barra final se houver
         self.api_key = api_key
         self.custom_headers = headers or {}
+        
+        # Log para debug (apenas primeiros caracteres da API key)
+        if self.api_key:
+            logger.debug("MCPClientHTTP inicializado com API key: %s...", self.api_key[:10])
+        else:
+            logger.warning("MCPClientHTTP inicializado SEM API key!")
         self.connected = False
         self.message_handler = MessageHandler()
         self.on_message: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -76,13 +82,38 @@ class MCPClientHTTP:
             
             # Enviar requisição HTTP POST
             try:
+                # Verificar se API key está configurada
+                if not self.api_key:
+                    logger.error("API key não configurada no MCPClientHTTP!")
+                    if future:
+                        request_id = message.get("id")
+                        if request_id in self._pending_requests:
+                            del self._pending_requests[request_id]
+                    return None
+                
+                # Headers para a requisição (incluir Authorization)
+                request_headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                # Mesclar com headers customizados se houver (mas garantir que Authorization não seja sobrescrito)
+                for key, value in self.custom_headers.items():
+                    if key.lower() == 'authorization':
+                        # Se já tem Authorization nos custom_headers, usar ele
+                        request_headers['Authorization'] = value
+                    else:
+                        request_headers[key] = value
+                
+                # Log detalhado do Authorization header
+                auth_header = request_headers.get('Authorization', 'NÃO ENCONTRADO')
+                logger.info("Enviando requisição HTTP POST para %s com Authorization: %s", 
+                          self.url, auth_header[:30] + '...' if len(auth_header) > 30 else auth_header)
+                
                 async with self._session.post(
                     self.url,
                     json=message,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json, text/event-stream"
-                    }
+                    headers=request_headers
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()

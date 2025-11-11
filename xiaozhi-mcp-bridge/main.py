@@ -9,6 +9,17 @@ import os
 import yaml
 from pathlib import Path
 
+# Tentar carregar variáveis de ambiente do arquivo .env
+try:
+    from dotenv import load_dotenv
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        logging.getLogger(__name__).debug("Variáveis de ambiente carregadas de .env")
+except ImportError:
+    # python-dotenv não instalado, continuar sem ele
+    pass
+
 # Adicionar src ao path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
@@ -99,8 +110,22 @@ def main():
             # Determinar tipo de conexão (HTTP, SSH ou local)
             if mcp_config.get('url'):
                 # Servidor HTTP/HTTPS
+                # Usar API key do config.yaml (já está configurada lá)
                 api_key = mcp_config.get('api_key', '')
                 headers = mcp_config.get('headers', {})
+                
+                # Garantir que API key está configurada
+                if not api_key:
+                    logger.error("API key não encontrada para servidor MCP HTTP: %s", mcp_config.get('name'))
+                    sys.exit(1)
+                
+                # Garantir que Authorization header está configurado
+                if 'Authorization' not in headers:
+                    headers['Authorization'] = f'Bearer {api_key}'
+                
+                # Log para debug
+                logger.info("Configurando servidor HTTP %s com API key: %s...", 
+                          mcp_config.get('name'), api_key[:10] if api_key else 'VAZIA')
                 
                 mcp_servers.append({
                     'name': mcp_config['name'],

@@ -15,13 +15,23 @@ class MCPClientHTTP:
     """Cliente MCP que se conecta via HTTP/HTTPS"""
     
     def __init__(self, url: str, api_key: str, headers: Optional[Dict[str, str]] = None):
-        self.url = url.rstrip('/')  # Remover barra final se houver
-        self.api_key = api_key
+        # Normalizar URL: garantir que termine com / se não tiver
+        url = url.rstrip('/')
+        if not url.endswith('/'):
+            url += '/'
+        self.url = url
+        self.api_key = api_key or ''
         self.custom_headers = headers or {}
+        
+        # Garantir que Authorization nos custom_headers tenha Bearer se não tiver
+        if 'Authorization' in self.custom_headers:
+            auth_val = self.custom_headers['Authorization']
+            if not auth_val.startswith('Bearer '):
+                self.custom_headers['Authorization'] = f"Bearer {auth_val}"
         
         # Log para debug (apenas primeiros caracteres da API key)
         if self.api_key:
-            logger.debug("MCPClientHTTP inicializado com API key: %s...", self.api_key[:10])
+            logger.info("MCPClientHTTP inicializado com API key: %s... (tamanho: %d)", self.api_key[:10], len(self.api_key))
         else:
             logger.warning("MCPClientHTTP inicializado SEM API key!")
         self.connected = False
@@ -38,17 +48,49 @@ class MCPClientHTTP:
             logger.info("Conectando ao servidor MCP via HTTP: %s", self.url)
             
             # Criar sessão HTTP
+            # Garantir que Authorization tenha "Bearer" se não tiver
+            # Prioridade: 1) api_key, 2) custom_headers['Authorization']
+            auth_header = ''
+            if self.api_key:
+                # Usar api_key como fonte principal
+                auth_header = f"Bearer {self.api_key}"
+            else:
+                # Se não tem api_key, tentar usar custom_headers
+                auth_header = self.custom_headers.get('Authorization', '')
+                if auth_header and not auth_header.startswith('Bearer '):
+                    # Se custom_headers tem Authorization mas sem "Bearer", adicionar
+                    auth_header = f"Bearer {auth_header}"
+            
+            # Se ainda não tem Authorization válido, usar api_key mesmo que vazio (para log de erro)
+            if not auth_header or auth_header == 'Bearer ':
+                if self.api_key:
+                    auth_header = f"Bearer {self.api_key}"
+                else:
+                    logger.error("Nenhuma API key configurada! Verifique api_key no config.yaml")
+                    auth_header = ''
+            
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
-                "Authorization": f"Bearer {self.api_key}",
-                **self.custom_headers
+                **{k: v for k, v in self.custom_headers.items() if k.lower() != 'authorization'}
             }
             
+            # Adicionar Authorization apenas se tiver valor válido
+            if auth_header:
+                headers["Authorization"] = auth_header
+                logger.info("Authorization header configurado: %s... (tamanho: %d)", auth_header[:30], len(auth_header))
+            else:
+                logger.error("ATENÇÃO: Authorization header NÃO configurado! Verifique api_key no config.yaml")
+            
+            # Criar sessão HTTP sem headers padrão (vamos passar em cada requisição)
+            # Isso garante que os headers sejam sempre enviados corretamente
             self._session = aiohttp.ClientSession(
-                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30)
             )
+            
+            # Armazenar headers para usar em cada requisição
+            self._default_headers = headers
+            logger.debug("Headers padrão configurados: %s", {k: (v[:30] + '...' if len(v) > 30 else v) if k.lower() == 'authorization' else v for k, v in headers.items()})
             
             self.connected = True
             logger.info("Conectado ao servidor MCP HTTP com sucesso")
@@ -82,33 +124,61 @@ class MCPClientHTTP:
             
             # Enviar requisição HTTP POST
             try:
-                # Verificar se API key está configurada
-                if not self.api_key:
-                    logger.error("API key não configurada no MCPClientHTTP!")
+                # Headers para a requisição - usar os headers padrão configurados
+                # Isso garante que Authorization sempre seja enviado
+                request_headers = self._default_headers.copy() if hasattr(self, '_default_headers') else {}
+                
+                # Garantir que Authorization está presente e com Bearer
+                # Prioridade: 1) api_key, 2) request_headers['Authorization']
+                auth_header = ''
+                if self.api_key:
+                    # Sempre usar api_key como fonte principal
+                    auth_header = f"Bearer {self.api_key}"
+                else:
+                    # Se não tem api_key, tentar usar do request_headers
+                    auth_header = request_headers.get('Authorization', '')
+                    if auth_header and not auth_header.startswith('Bearer '):
+                        auth_header = f"Bearer {auth_header}"
+                
+                # Se ainda não tem Authorization válido, logar erro
+                if not auth_header or auth_header == 'Bearer ':
+                    logger.error("API key não configurada no MCPClientHTTP! Verifique api_key no config.yaml")
                     if future:
                         request_id = message.get("id")
                         if request_id in self._pending_requests:
                             del self._pending_requests[request_id]
                     return None
                 
-                # Headers para a requisição (incluir Authorization)
-                request_headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                    "Authorization": f"Bearer {self.api_key}"
-                }
-                # Mesclar com headers customizados se houver (mas garantir que Authorization não seja sobrescrito)
-                for key, value in self.custom_headers.items():
-                    if key.lower() == 'authorization':
-                        # Se já tem Authorization nos custom_headers, usar ele
-                        request_headers['Authorization'] = value
-                    else:
-                        request_headers[key] = value
+                # Garantir que Authorization está nos headers da requisição
+                request_headers['Authorization'] = auth_header
                 
-                # Log detalhado do Authorization header
-                auth_header = request_headers.get('Authorization', 'NÃO ENCONTRADO')
-                logger.info("Enviando requisição HTTP POST para %s com Authorization: %s", 
-                          self.url, auth_header[:30] + '...' if len(auth_header) > 30 else auth_header)
+                # Log detalhado do Authorization header e mensagem
+                auth_header_log = request_headers.get('Authorization', 'NÃO ENCONTRADO')
+                method_name = message.get('method', 'unknown')
+                params = message.get('params', {})
+                tool_name = params.get('name', 'unknown') if isinstance(params, dict) else 'unknown'
+                
+                # Log completo do Authorization header (sem truncar para debug)
+                logger.info("Enviando requisição HTTP POST para %s - Method: %s, Tool: %s", 
+                          self.url, method_name, tool_name)
+                logger.info("Authorization header completo: %s (tamanho: %d)", auth_header, len(auth_header))
+                logger.info("API key usada: %s (tamanho: %d)", self.api_key, len(self.api_key) if self.api_key else 0)
+                
+                # Log completo dos headers antes de enviar
+                logger.debug("Headers completos da requisição: %s", {k: (v[:30] + '...' if len(v) > 30 else v) if k.lower() == 'authorization' else v for k, v in request_headers.items()})
+                
+                # Garantir que Authorization está presente e correto antes de enviar
+                if 'Authorization' not in request_headers or not request_headers['Authorization']:
+                    logger.error("ERRO CRÍTICO: Authorization header não encontrado antes de enviar requisição!")
+                    if future:
+                        request_id = message.get("id")
+                        if request_id in self._pending_requests:
+                            del self._pending_requests[request_id]
+                    return None
+                
+                # Log final antes de enviar (para debug)
+                logger.debug("URL da requisição: %s", self.url)
+                logger.debug("Authorization header final: %s", request_headers.get('Authorization', 'NÃO ENCONTRADO'))
                 
                 async with self._session.post(
                     self.url,

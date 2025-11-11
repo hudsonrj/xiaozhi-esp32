@@ -41,6 +41,12 @@ class MCPClient:
             logger.info("Conectando ao servidor MCP via SSH: %s@%s:%d:%s", 
                        self.ssh_user, self.ssh_host, self.ssh_port, self.ssh_command)
             
+            # Log sobre senha (sem mostrar a senha completa)
+            if self.ssh_password:
+                logger.debug("Senha SSH configurada: %s caracteres", len(self.ssh_password))
+            else:
+                logger.warning("Senha SSH não configurada - tentando conexão sem autenticação")
+            
             # Usar paramiko se tiver senha, senão usar subprocess
             if self.ssh_password:
                 return await self._connect_with_paramiko()
@@ -57,11 +63,13 @@ class MCPClient:
     async def _connect_with_paramiko(self) -> bool:
         """Conecta usando paramiko (suporta senha)"""
         try:
+            logger.info("Usando paramiko para conectar com senha SSH")
             # Criar cliente SSH
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             
             # Conectar em thread separada (paramiko não é async nativo)
+            logger.debug("Conectando SSH via paramiko: %s@%s:%d", self.ssh_user, self.ssh_host, self.ssh_port)
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
@@ -70,11 +78,12 @@ class MCPClient:
                     port=self.ssh_port,
                     username=self.ssh_user,
                     password=self.ssh_password,
-                    timeout=10,
+                    timeout=30,  # Aumentar timeout de conexão SSH
                     look_for_keys=False,
                     allow_agent=False
                 )
             )
+            logger.info("Conexão SSH estabelecida com sucesso")
             
             # Executar comando e obter canal
             transport = self.ssh_client.get_transport()
@@ -82,8 +91,19 @@ class MCPClient:
                 logger.error("Falha ao obter transporte SSH")
                 return False
             
+            logger.debug("Executando comando remoto: %s", self.ssh_command)
             self.ssh_channel = transport.open_session()
             self.ssh_channel.exec_command(self.ssh_command)
+            
+            # Aguardar um pouco para o comando iniciar
+            await asyncio.sleep(0.5)
+            
+            # Verificar se o canal está ativo
+            if self.ssh_channel.closed:
+                logger.error("Canal SSH fechado imediatamente após execução")
+                return False
+            
+            logger.debug("Canal SSH aberto e pronto")
             
             # Criar StreamReader para ler do canal
             self.reader = asyncio.StreamReader()
@@ -91,22 +111,43 @@ class MCPClient:
             # Task para ler do canal SSH e alimentar reader
             async def feed_reader():
                 try:
+                    logger.debug("Iniciando feed_reader para canal SSH")
                     while self.connected and self.ssh_channel and not self.ssh_channel.closed:
                         if self.ssh_channel.recv_ready():
                             data = self.ssh_channel.recv(4096)
                             if not data:
+                                logger.debug("Nenhum dado recebido do canal SSH")
                                 break
+                            logger.debug("Dados recebidos do canal SSH: %d bytes", len(data))
                             self.reader.feed_data(data)
                         else:
                             await asyncio.sleep(0.1)
                 except Exception as e:
-                    logger.debug("Erro ao alimentar reader: %s", e)
+                    logger.error("Erro ao alimentar reader do canal SSH: %s", e, exc_info=True)
                 finally:
+                    logger.debug("feed_reader terminando")
                     if not self.reader.at_eof():
                         self.reader.feed_eof()
             
             # Iniciar task para alimentar reader
             asyncio.create_task(feed_reader())
+            
+            # Task para monitorar stderr do canal SSH
+            async def monitor_stderr():
+                try:
+                    logger.debug("Iniciando monitoramento de stderr do canal SSH")
+                    while self.connected and self.ssh_channel and not self.ssh_channel.closed:
+                        if self.ssh_channel.recv_stderr_ready():
+                            data = self.ssh_channel.recv_stderr(4096)
+                            if data:
+                                error_msg = data.decode('utf-8', errors='ignore').strip()
+                                if error_msg:
+                                    logger.warning("SSH stderr (paramiko): %s", error_msg)
+                        await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.debug("Erro ao monitorar stderr: %s", e)
+            
+            asyncio.create_task(monitor_stderr())
             
             self.connected = True
             
@@ -360,10 +401,11 @@ class MCPClient:
             # Se é requisição, aguardar resposta
             if future:
                 try:
-                    response = await asyncio.wait_for(future, timeout=30.0)
+                    # Aumentar timeout para 60 segundos (servidores remotos podem demorar mais)
+                    response = await asyncio.wait_for(future, timeout=60.0)
                     return response
                 except asyncio.TimeoutError:
-                    logger.error("Timeout aguardando resposta do servidor MCP")
+                    logger.error("Timeout aguardando resposta do servidor MCP (60s)")
                     request_id = message.get("id")
                     if request_id in self._pending_requests:
                         del self._pending_requests[request_id]

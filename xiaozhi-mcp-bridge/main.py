@@ -15,10 +15,19 @@ try:
     env_path = os.path.join(os.path.dirname(__file__), '.env')
     if os.path.exists(env_path):
         load_dotenv(env_path)
-        logging.getLogger(__name__).debug("Variáveis de ambiente carregadas de .env")
+        # Verificar se SSH_PASSWORD foi carregada (sem mostrar o valor)
+        ssh_pass = os.environ.get('SSH_PASSWORD')
+        if ssh_pass:
+            print(f"[INFO] Arquivo .env carregado - SSH_PASSWORD encontrada ({len(ssh_pass)} caracteres)")
+        else:
+            print("[INFO] Arquivo .env carregado - SSH_PASSWORD não encontrada")
+    else:
+        print(f"[INFO] Arquivo .env não encontrado em: {env_path}")
 except ImportError:
     # python-dotenv não instalado, continuar sem ele
-    pass
+    print("[WARNING] python-dotenv não instalado - variáveis de ambiente do .env não serão carregadas")
+except Exception as e:
+    print(f"[WARNING] Erro ao carregar .env: {e}")
 
 # Adicionar src ao path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -137,6 +146,14 @@ def main():
                 # Servidor remoto via SSH
                 ssh_port = mcp_config.get('ssh_port', 22)
                 ssh_password = os.environ.get('SSH_PASSWORD') or mcp_config.get('ssh_password')
+                
+                # Log sobre senha SSH (sem mostrar a senha completa)
+                if ssh_password:
+                    logger.info("Senha SSH encontrada para servidor %s: %d caracteres", 
+                              mcp_config.get('name'), len(ssh_password))
+                else:
+                    logger.warning("Senha SSH não encontrada para servidor %s (variável SSH_PASSWORD ou config.yaml)", 
+                                 mcp_config.get('name'))
                 
                 mcp_servers.append({
                     'name': mcp_config['name'],

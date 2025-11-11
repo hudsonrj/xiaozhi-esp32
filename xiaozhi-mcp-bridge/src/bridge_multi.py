@@ -305,14 +305,44 @@ class MultiMCPBridge:
             local_message["id"] = local_id
             
             # Remover prefixo do nome da ferramenta se necessário
+            original_tool_name = tool_name
             server_name_normalized = server_name.lower().replace('-', '_')
-            if tool_name.startswith(f"{server_name_normalized}_"):
-                local_message["params"]["name"] = tool_name[len(f"{server_name_normalized}_"):]
-            elif tool_name.startswith(f"{server_name.lower()}_"):
-                local_message["params"]["name"] = tool_name[len(f"{server_name.lower()}_"):]
             
-            logger.debug("Roteando tools/call para %s: %s (cloud_id=%s -> local_id=%s)",
-                       server_name, tool_name, cloud_id, local_id)
+            # Remover prefixos comuns do ApeRAG
+            # O servidor é "aperag-mcp", então o prefixo pode ser:
+            # - "aperag-mcp_" -> remove tudo
+            # - "aperag_mcp_" -> remove tudo (underscore no lugar do hífen)
+            # - "aperag_" -> remove apenas "aperag_"
+            # O nome real das ferramentas do ApeRAG não tem "mcp_" no início
+            if tool_name.startswith("aperag-mcp_"):
+                tool_name = tool_name[len("aperag-mcp_"):]
+            elif tool_name.startswith("aperag_mcp_"):
+                tool_name = tool_name[len("aperag_mcp_"):]
+            elif tool_name.startswith("aperag_"):
+                # Se começa com "aperag_" mas não é "aperag_mcp_", pode ser que o nome original já tenha "mcp_"
+                # Mas o nome real não deve ter "mcp_", então removemos apenas "aperag_"
+                tool_name = tool_name[len("aperag_"):]
+                # Se ainda começa com "mcp_", remover também
+                if tool_name.startswith("mcp_"):
+                    tool_name = tool_name[len("mcp_"):]
+            elif tool_name.startswith(f"{server_name_normalized}_"):
+                tool_name = tool_name[len(f"{server_name_normalized}_"):]
+                # Se ainda começa com "mcp_", remover também
+                if tool_name.startswith("mcp_"):
+                    tool_name = tool_name[len("mcp_"):]
+            elif tool_name.startswith(f"{server_name.lower()}_"):
+                tool_name = tool_name[len(f"{server_name.lower()}_"):]
+                # Se ainda começa com "mcp_", remover também
+                if tool_name.startswith("mcp_"):
+                    tool_name = tool_name[len("mcp_"):]
+            
+            local_message["params"]["name"] = tool_name
+            
+            # NOTA: A API key do ApeRAG é passada apenas no header Authorization,
+            # não nos argumentos da ferramenta. O MCPClientHTTP já faz isso automaticamente.
+            
+            logger.info("Roteando tools/call para %s: %s -> %s (cloud_id=%s -> local_id=%s)",
+                       server_name, original_tool_name, tool_name, cloud_id, local_id)
             
             # Encaminhar para o servidor correto
             asyncio.create_task(self._forward_request_to_mcp(local_message, cloud_id, client_idx))

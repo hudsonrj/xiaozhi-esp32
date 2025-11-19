@@ -84,8 +84,10 @@ class MCPClientHTTP:
             
             # Criar sessão HTTP sem headers padrão (vamos passar em cada requisição)
             # Isso garante que os headers sejam sempre enviados corretamente
+            # Timeout aumentado para 120s (2 minutos) para buscas complexas do ApeRAG
+            # que podem usar múltiplos índices (vector, fulltext, graph, summary, vision) + reranking
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30)
+                timeout=aiohttp.ClientTimeout(total=120, connect=30)
             )
             
             # Armazenar headers para usar em cada requisição

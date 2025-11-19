@@ -47,12 +47,18 @@ def setup_logging(config: dict):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Handler para arquivo
-    file_handler = logging.FileHandler(log_file)
+    # Handler para arquivo (com encoding UTF-8 para suportar emojis e caracteres especiais)
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(log_level)
     file_handler.setFormatter(formatter)
     
-    # Handler para console
+    # Handler para console (com encoding UTF-8)
+    # No Windows, configurar stdout para UTF-8
+    if sys.platform == 'win32':
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)

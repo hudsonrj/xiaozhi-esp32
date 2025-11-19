@@ -2,6 +2,7 @@
 Bridge Multi-MCP que agrega ferramentas de múltiplos servidores MCP
 """
 import asyncio
+import json
 import logging
 from typing import Dict, Any, Optional, List, Union
 from websocket_client import WebSocketClient
@@ -10,6 +11,10 @@ from mcp_client_http import MCPClientHTTP
 from message_handler import MessageHandler
 
 logger = logging.getLogger(__name__)
+
+# Limite de tamanho de mensagem WebSocket (50KB para ser conservador)
+MAX_MESSAGE_SIZE = 50 * 1024  # 50KB
+MAX_CONTENT_LENGTH = 2000  # Máximo de caracteres por conteúdo de resultado
 
 
 class MultiMCPBridge:
@@ -52,6 +57,9 @@ class MultiMCPBridge:
         
         # Cache de ferramentas agregadas
         self._aggregated_tools: Optional[List[Dict[str, Any]]] = None
+        
+        # Cache de mapeamento nome -> ID de collections
+        self._collection_name_to_id: Dict[str, str] = {}
         
         # Configurar callbacks
         self._setup_callbacks()
@@ -98,7 +106,7 @@ class MultiMCPBridge:
             
             # Interceptar tools/list para agregar ferramentas
             if method == "tools/list":
-                logger.info("🔍 Interceptando tools/list do agente (id=%s)", payload.get("id"))
+                logger.info("[BUSCA] Interceptando tools/list do agente (id=%s)", payload.get("id"))
                 await self._handle_aggregated_tools_list(payload)
                 return
             
@@ -203,11 +211,11 @@ class MultiMCPBridge:
                             if not tool_name.startswith("portal_") and not tool_name.startswith("sql_") and not tool_name.startswith("aperag_"):
                                 tool["name"] = f"{server_name.lower().replace('-', '_')}_{tool_name}"
                         all_tools.extend(tools)
-                        logger.info("✅ Recebidas %d ferramentas de %s", len(tools), server_name)
+                        logger.info("[OK] Recebidas %d ferramentas de %s", len(tools), server_name)
                     else:
                         logger.warning("Resposta inválida de %s: %s", server_name, response)
                 except Exception as e:
-                    logger.error("❌ Erro ao buscar ferramentas de %s: %s", server_name, e, exc_info=True)
+                    logger.error("[ERRO] Erro ao buscar ferramentas de %s: %s", server_name, e, exc_info=True)
             
             # Cachear ferramentas agregadas
             self._aggregated_tools = all_tools
@@ -300,8 +308,9 @@ class MultiMCPBridge:
             self.id_mapping[cloud_id] = (client_idx, local_id)
             self.reverse_id_mapping[(client_idx, local_id)] = cloud_id
             
-            # Criar mensagem local
-            local_message = request.copy()
+            # Criar mensagem local (deep copy para poder modificar)
+            import copy
+            local_message = copy.deepcopy(request)
             local_message["id"] = local_id
             
             # Remover prefixo do nome da ferramenta se necessário
@@ -340,6 +349,35 @@ class MultiMCPBridge:
             
             # NOTA: A API key do ApeRAG é passada apenas no header Authorization,
             # não nos argumentos da ferramenta. O MCPClientHTTP já faz isso automaticamente.
+            
+            # Se é uma busca em collection e o collection_id não começa com "col",
+            # tentar converter nome para ID
+            logger.debug("Verificando se tool_name '%s' requer conversão de collection_id", tool_name)
+            if tool_name in ["search_collection", "search_chat_files"]:
+                # Garantir que params e arguments existem
+                if "params" not in local_message:
+                    local_message["params"] = {}
+                if "arguments" not in local_message["params"]:
+                    local_message["params"]["arguments"] = {}
+                
+                arguments = local_message["params"]["arguments"]
+                collection_id = arguments.get("collection_id")
+                
+                logger.info("Verificando collection_id: '%s' (tipo: %s, tool_name: %s)", collection_id, type(collection_id), tool_name)
+                
+                if collection_id and isinstance(collection_id, str) and not collection_id.startswith("col"):
+                    # É um nome, não um ID - tentar converter
+                    logger.info("Collection ID '%s' parece ser um nome (não começa com 'col'), tentando converter para ID...", collection_id)
+                    converted_id = await self._convert_collection_name_to_id(collection_id, client_idx)
+                    if converted_id:
+                        arguments["collection_id"] = converted_id
+                        logger.info("Convertido '%s' -> '%s'", collection_id, converted_id)
+                    else:
+                        logger.warning("Não foi possível converter collection '%s' para ID, tentando usar como está", collection_id)
+                elif collection_id:
+                    logger.debug("Collection ID '%s' já parece ser um ID válido (começa com 'col')", collection_id)
+                else:
+                    logger.warning("collection_id não encontrado ou está vazio nos arguments")
             
             logger.info("Roteando tools/call para %s: %s -> %s (cloud_id=%s -> local_id=%s)",
                        server_name, original_tool_name, tool_name, cloud_id, local_id)
@@ -448,8 +486,10 @@ class MultiMCPBridge:
     async def _forward_response_to_cloud(self, response: Dict[str, Any]):
         """Encaminha resposta do MCP local para cloud"""
         try:
-            await self.ws_client.send_message(response)
-            logger.debug("Resposta enviada para cloud: %s", response.get("id"))
+            # Truncar resposta se muito grande
+            truncated_response = self._truncate_response(response)
+            await self.ws_client.send_message(truncated_response)
+            logger.debug("Resposta enviada para cloud: %s", truncated_response.get("id"))
         except Exception as e:
             logger.error("Erro ao encaminhar resposta para cloud: %s", e)
     
@@ -465,6 +505,211 @@ class MultiMCPBridge:
         """Gera próximo ID local"""
         self._local_id_counter += 1
         return self._local_id_counter
+    
+    async def _convert_collection_name_to_id(self, collection_name: str, client_idx: int) -> Optional[str]:
+        """Converte nome de collection para ID usando list_collections"""
+        try:
+            # Verificar cache primeiro
+            if collection_name in self._collection_name_to_id:
+                return self._collection_name_to_id[collection_name]
+            
+            client = self.mcp_clients[client_idx]
+            if not client.connected:
+                logger.warning("Cliente MCP não conectado, não é possível converter nome para ID")
+                return None
+            
+            # Chamar list_collections
+            list_request = {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "list_collections",
+                    "arguments": {}
+                },
+                "id": self._get_next_local_id()
+            }
+            
+            logger.debug("Chamando list_collections para converter '%s' para ID", collection_name)
+            response = await client.send_message(list_request)
+            
+            if response and "result" in response:
+                result = response["result"]
+                
+                # Tentar structuredContent primeiro
+                if "structuredContent" in result:
+                    structured = result["structuredContent"]
+                    if "items" in structured:
+                        collections = structured["items"]
+                        for coll in collections:
+                            coll_id = coll.get("id", "")
+                            coll_title = coll.get("title", "").lower()
+                            coll_name_lower = collection_name.lower()
+                            
+                            # Comparar título (case-insensitive)
+                            if coll_title == coll_name_lower:
+                                self._collection_name_to_id[collection_name] = coll_id
+                                logger.info("Encontrado ID para '%s': %s", collection_name, coll_id)
+                                return coll_id
+                
+                # Tentar content (formato alternativo)
+                if "content" in result:
+                    content = result["content"]
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and "text" in item:
+                                try:
+                                    text_data = json.loads(item["text"])
+                                    if "items" in text_data:
+                                        collections = text_data["items"]
+                                        for coll in collections:
+                                            coll_id = coll.get("id", "")
+                                            coll_title = coll.get("title", "").lower()
+                                            coll_name_lower = collection_name.lower()
+                                            
+                                            if coll_title == coll_name_lower:
+                                                self._collection_name_to_id[collection_name] = coll_id
+                                                logger.info("Encontrado ID para '%s': %s", collection_name, coll_id)
+                                                return coll_id
+                                except (json.JSONDecodeError, KeyError):
+                                    continue
+            
+            logger.warning("Collection '%s' não encontrada em list_collections", collection_name)
+            return None
+            
+        except Exception as e:
+            logger.error("Erro ao converter nome de collection para ID: %s", e, exc_info=True)
+            return None
+    
+    def _truncate_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Trunca resposta se muito grande para evitar erro 'message too big'"""
+        try:
+            # Serializar para verificar tamanho
+            response_str = json.dumps(response, ensure_ascii=False)
+            response_size = len(response_str.encode('utf-8'))
+            
+            if response_size <= MAX_MESSAGE_SIZE:
+                return response
+            
+            logger.warning("Resposta muito grande (%d bytes), truncando...", response_size)
+            
+            # Se é uma resposta de ferramenta, tentar truncar o conteúdo dos resultados
+            result = response.get("result", {})
+            
+            # Verificar se é resposta de search_collection ou search_chat_files
+            if isinstance(result, dict):
+                # Truncar conteúdo de resultados de busca
+                if "items" in result:
+                    items = result["items"]
+                    truncated_items = []
+                    for item in items:
+                        truncated_item = item.copy()
+                        content = truncated_item.get("content", "")
+                        if isinstance(content, str):
+                            # Limitar tamanho do conteúdo
+                            if len(content) > MAX_CONTENT_LENGTH:
+                                truncated_item["content"] = content[:MAX_CONTENT_LENGTH] + "... [truncado]"
+                        truncated_items.append(truncated_item)
+                    
+                    # Se ainda muito grande, reduzir número de itens
+                    if len(truncated_items) > 5:
+                        truncated_items = truncated_items[:5]
+                        logger.info("Reduzido número de resultados de %d para 5", len(items))
+                    
+                    result["items"] = truncated_items
+                    logger.info("Truncados %d resultados de busca", len(truncated_items))
+                
+                # Truncar conteúdo direto se existir
+                if "content" in result:
+                    content = result["content"]
+                    if isinstance(content, str):
+                        if len(content) > MAX_CONTENT_LENGTH:
+                            result["content"] = content[:MAX_CONTENT_LENGTH] + "... [truncado]"
+                    elif isinstance(content, list):
+                        truncated_content = []
+                        total_length = 0
+                        max_items = 10  # Limite inicial de itens
+                        for idx, item in enumerate(content):
+                            if isinstance(item, dict) and "text" in item:
+                                text = item["text"]
+                                if isinstance(text, str):
+                                    # Limitar tamanho de cada texto de forma mais agressiva
+                                    max_text_length = min(MAX_CONTENT_LENGTH, (MAX_MESSAGE_SIZE // 4) - 100)
+                                    if len(text) > max_text_length:
+                                        item = item.copy()
+                                        item["text"] = text[:max_text_length] + "... [truncado]"
+                                    total_length += len(item.get("text", ""))
+                                    # Limitar número de itens se muito grande
+                                    if total_length > MAX_MESSAGE_SIZE // 2 or idx >= max_items:
+                                        logger.info("Parando truncamento de content em item %d (tamanho total: %d)", idx, total_length)
+                                        break
+                            truncated_content.append(item)
+                        result["content"] = truncated_content
+                        logger.info("Truncado content de %d para %d itens", len(content), len(truncated_content))
+            
+            # Verificar tamanho novamente após truncamento
+            response_str = json.dumps(response, ensure_ascii=False)
+            response_size = len(response_str.encode('utf-8'))
+            
+            # Se ainda muito grande, tentar reduzir ainda mais
+            if response_size > MAX_MESSAGE_SIZE:
+                logger.warning("Resposta ainda muito grande após primeiro truncamento (%d bytes), aplicando truncamento mais agressivo...", response_size)
+                
+                # Reduzir ainda mais o conteúdo
+                if isinstance(result, dict):
+                    # Reduzir items se existir
+                    if "items" in result:
+                        items = result["items"]
+                        if len(items) > 2:
+                            result["items"] = items[:2]
+                            logger.warning("Reduzido para apenas 2 resultados devido ao tamanho")
+                        # Truncar ainda mais o conteúdo de cada item
+                        for item in result["items"]:
+                            if "content" in item and isinstance(item["content"], str):
+                                if len(item["content"]) > 1000:
+                                    item["content"] = item["content"][:1000] + "... [truncado]"
+                    
+                    # Reduzir content se existir
+                    if "content" in result:
+                        content = result["content"]
+                        if isinstance(content, list):
+                            # Manter apenas primeiros 3 itens e truncar cada um
+                            result["content"] = content[:3]
+                            for item in result["content"]:
+                                if isinstance(item, dict) and "text" in item:
+                                    text = item["text"]
+                                    if isinstance(text, str) and len(text) > 5000:
+                                        item["text"] = text[:5000] + "... [truncado]"
+                        elif isinstance(content, str):
+                            if len(content) > 10000:
+                                result["content"] = content[:10000] + "... [truncado]"
+                
+                # Verificar tamanho novamente
+                response_str = json.dumps(response, ensure_ascii=False)
+                response_size = len(response_str.encode('utf-8'))
+                logger.info("Tamanho após truncamento agressivo: %d bytes", response_size)
+            
+            if response_size > MAX_MESSAGE_SIZE:
+                # Se ainda muito grande, criar resposta de erro
+                logger.error("Resposta ainda muito grande após truncamento (%d bytes), retornando erro", response_size)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": response.get("id"),
+                    "error": {
+                        "code": -32603,
+                        "message": "Resposta muito grande. Tente reduzir o número de resultados (topk) ou refinar a busca.",
+                        "data": {
+                            "original_size": response_size,
+                            "max_size": MAX_MESSAGE_SIZE
+                        }
+                    }
+                }
+            
+            logger.info("Resposta truncada para %d bytes", response_size)
+            return response
+            
+        except Exception as e:
+            logger.error("Erro ao truncar resposta: %s", e, exc_info=True)
+            return response
     
     async def start(self):
         """Inicia a bridge"""

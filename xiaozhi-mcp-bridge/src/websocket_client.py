@@ -142,7 +142,7 @@ class WebSocketClient:
             # Se tem "type", pode ser "hello" ou "mcp"
             if message_type == "hello":
                 self.session_id = message.get("session_id")
-                logger.info("✅ Recebida mensagem 'hello' do servidor, session_id: %s", self.session_id)
+                logger.info("[OK] Recebida mensagem 'hello' do servidor, session_id: %s", self.session_id)
                 return
             
             if message_type == "mcp":

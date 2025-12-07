@@ -220,16 +220,17 @@ class MultiWebSocketBridge:
                 await self._forward_response_to_cloud(response, endpoint_id)
                 return
             
-            # Buscar ferramentas de todos os servidores conectados
-            all_tools = []
-            
+            # Buscar ferramentas de todos os servidores conectados em paralelo
             logger.info("Verificando %d clientes MCP (%d conectados)...", len(self.mcp_clients), len(connected_clients))
-            for idx, client in enumerate(self.mcp_clients):
+            
+            # Criar lista de tarefas para executar em paralelo
+            async def fetch_tools_from_server(idx: int, client):
+                """Busca ferramentas de um servidor MCP específico"""
                 server_name = getattr(client, 'server_name', f'MCP-{idx}')
                 
                 if not client.connected:
                     logger.warning("Cliente MCP %d (%s) não conectado, pulando", idx, server_name)
-                    continue
+                    return []
                 
                 # Enviar tools/list para este servidor
                 tools_list_request = {
@@ -260,12 +261,30 @@ class MultiWebSocketBridge:
                                 not tool_name.startswith("notion_") and
                                 not tool_name.startswith(f"{server_prefix}_")):
                                 tool["name"] = f"{server_prefix}_{tool_name}"
-                        all_tools.extend(tools)
                         logger.info("[OK] Recebidas %d ferramentas de %s", len(tools), server_name)
+                        return tools
                     else:
                         logger.warning("Resposta inválida de %s: %s", server_name, response)
+                        return []
                 except Exception as e:
                     logger.error("[ERRO] Erro ao buscar ferramentas de %s: %s", server_name, e, exc_info=True)
+                    return []
+            
+            # Executar todas as buscas em paralelo
+            tasks = []
+            for idx, client in enumerate(self.mcp_clients):
+                tasks.append(fetch_tools_from_server(idx, client))
+            
+            # Aguardar todas as respostas em paralelo
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Agregar todas as ferramentas
+            all_tools = []
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Exceção ao buscar ferramentas: %s", result, exc_info=True)
+                elif isinstance(result, list):
+                    all_tools.extend(result)
             
             # Cachear ferramentas agregadas
             self._aggregated_tools = all_tools

@@ -1,6 +1,6 @@
-tree 4329bc3750e23b7c78e548d1ca4ed78189b5e831
-parent 47a7762b4c9e944bced489e545ab468a3d462110
-author Terrence <terrence@tenclass.com> 1726148927 +0800
-committer Terrence <terrence@tenclass.com> 1726148927 +0800
+tree 1fb8021b4f53cdac123c3825700e04acc29e44d8
+parent 8a6ae99b8f284fa7b91024ce0ea9a2df2baae86f
+author Terrence <terrence@tenclass.com> 1726543567 +0800
+committer Terrence <terrence@tenclass.com> 1726543567 +0800
 
-增加 RGB 灯亮的注意事项
+add vad to detection and communication

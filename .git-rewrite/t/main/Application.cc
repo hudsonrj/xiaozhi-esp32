@@ -1,11 +1,11 @@
 #include "Application.h"
 #include "BuiltinLed.h"
-#include "WifiStation.h"
 #include <cstring>
 #include "esp_log.h"
 #include "model_path.h"
 #include "SystemInfo.h"
 #include "cJSON.h"
+#include "driver/gpio.h"
 
 #define TAG "Application"
 
@@ -30,6 +30,8 @@ Application::Application() {
     if (opus_decode_sample_rate_ != CONFIG_AUDIO_OUTPUT_SAMPLE_RATE) {
         opus_resampler_.Configure(opus_decode_sample_rate_, CONFIG_AUDIO_OUTPUT_SAMPLE_RATE);
     }
+
+    firmware_upgrade_.SetCheckVersionUrl(CONFIG_OTA_VERSION_URL);
 }
 
 Application::~Application() {
@@ -66,6 +68,24 @@ Application::~Application() {
     vEventGroupDelete(event_group_);
 }
 
+void Application::CheckNewVersion() {
+    // Check if there is a new firmware version available
+    firmware_upgrade_.CheckVersion();
+    if (firmware_upgrade_.HasNewVersion()) {
+        // Wait for the chat state to be idle
+        while (chat_state_ != kChatStateIdle) {
+            vTaskDelay(100);
+        }
+        SetChatState(kChatStateUpgrading);
+        firmware_upgrade_.StartUpgrade();
+        // If upgrade success, the device will reboot and never reach here
+        ESP_LOGI(TAG, "Firmware upgrade failed...");
+        SetChatState(kChatStateIdle);
+    } else {
+        firmware_upgrade_.MarkValid();
+    }
+}
+
 void Application::Start() {
     // Initialize the audio device
     audio_device_.Start(CONFIG_AUDIO_INPUT_SAMPLE_RATE, CONFIG_AUDIO_OUTPUT_SAMPLE_RATE);
@@ -95,31 +115,21 @@ void Application::Start() {
         app->AudioDecodeTask();
     }, "opus_decode", opus_stack_size, this, 1, audio_decode_task_stack_, &audio_decode_task_buffer_);
 
-    auto& builtin_led = BuiltinLed::GetInstance();
-    // Blink the LED to indicate the device is connecting
-    builtin_led.SetBlue();
-    builtin_led.BlinkOnce();
-    WifiStation::GetInstance().Start();
-    
-    // Check if there is a new firmware version available
-    firmware_upgrade_.CheckVersion();
-    if (firmware_upgrade_.HasNewVersion()) {
-        builtin_led.TurnOn();
-        firmware_upgrade_.StartUpgrade();
-        // If upgrade success, the device will reboot and never reach here
-        ESP_LOGI(TAG, "Firmware upgrade failed...");
-        builtin_led.TurnOff();
-    } else {
-        firmware_upgrade_.MarkValid();
-    }
-
     StartCommunication();
     StartDetection();
 
     // Blink the LED to indicate the device is running
+    auto& builtin_led = BuiltinLed::GetInstance();
     builtin_led.SetGreen();
     builtin_led.BlinkOnce();
     xEventGroupSetBits(event_group_, DETECTION_RUNNING);
+
+    // Launch a task to check for new firmware version
+    xTaskCreate([](void* arg) {
+        Application* app = (Application*)arg;
+        app->CheckNewVersion();
+        vTaskDelete(NULL);
+    }, "check_new_version", 4096 * 2, this, 1, NULL);
 }
 
 void Application::SetChatState(ChatState state) {
@@ -150,9 +160,19 @@ void Application::SetChatState(ChatState state) {
             builtin_led.SetBlue();
             builtin_led.TurnOn();
             break;
+        case kChatStateTesting:
+            ESP_LOGI(TAG, "Chat state: testing");
+            builtin_led.SetRed();
+            builtin_led.TurnOn();
+            break;
+        case kChatStateUpgrading:
+            ESP_LOGI(TAG, "Chat state: upgrading");
+            builtin_led.SetGreen();
+            builtin_led.StartContinuousBlink(100);
+            break;
     }
 
-    const char* state_str[] = { "idle", "connecting", "listening", "speaking", "wake_word_detected", "unknown" };
+    const char* state_str[] = { "idle", "connecting", "listening", "speaking", "wake_word_detected", "testing", "unknown" };
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (ws_client_ && ws_client_->IsConnected()) {
         cJSON* root = cJSON_CreateObject();
@@ -169,7 +189,7 @@ void Application::StartCommunication() {
     afe_config_t afe_config = {
         .aec_init = false,
         .se_init = true,
-        .vad_init = false,
+        .vad_init = true,
         .wakenet_init = false,
         .voice_communication_init = true,
         .voice_communication_agc_init = true,
@@ -210,7 +230,7 @@ void Application::StartDetection() {
     afe_config_t afe_config = {
         .aec_init = false,
         .se_init = true,
-        .vad_init = false,
+        .vad_init = true,
         .wakenet_init = true,
         .voice_communication_init = false,
         .voice_communication_agc_init = false,
@@ -327,6 +347,49 @@ void Application::SendWakeWordData() {
     wake_word_opus_.clear();
 }
 
+void Application::CheckTestButton() {
+    if (gpio_get_level(GPIO_NUM_1) == 0) {
+        if (chat_state_ == kChatStateIdle) {
+            SetChatState(kChatStateTesting);
+            test_resampler_.Configure(CONFIG_AUDIO_INPUT_SAMPLE_RATE, CONFIG_AUDIO_OUTPUT_SAMPLE_RATE);
+        }
+    } else {
+        if (chat_state_ == kChatStateTesting) {
+            SetChatState(kChatStateIdle);
+            
+            // 创建新线程来处理音频播放
+            xTaskCreate([](void* arg) {
+                Application* app = static_cast<Application*>(arg);
+                app->PlayTestAudio();
+                vTaskDelete(NULL);
+            }, "play_test_audio", 4096, this, 1, NULL);
+        }
+    }
+}
+
+void Application::PlayTestAudio() {
+    // 写入音频数据到扬声器
+    auto packet = new AudioPacket();
+    packet->type = kAudioPacketTypeStart;
+    audio_device_.QueueAudioPacket(packet);
+
+    for (auto& pcm : test_pcm_) {
+        packet = new AudioPacket();
+        packet->type = kAudioPacketTypeData;
+        packet->pcm.resize(test_resampler_.GetOutputSamples(pcm.iov_len / 2));
+        test_resampler_.Process((int16_t*)pcm.iov_base, pcm.iov_len / 2, packet->pcm.data());
+        audio_device_.QueueAudioPacket(packet);
+        heap_caps_free(pcm.iov_base);
+    }
+    // 清除测试PCM数据
+    test_pcm_.clear();
+
+    // 停止音频设备
+    packet = new AudioPacket();
+    packet->type = kAudioPacketTypeStop;
+    audio_device_.QueueAudioPacket(packet);
+}
+
 void Application::AudioDetectionTask() {
     auto chunk_size = esp_afe_sr_v1.get_fetch_chunksize(afe_detection_data_);
     ESP_LOGI(TAG, "Audio detection task started, chunk size: %d", chunk_size);
@@ -346,7 +409,25 @@ void Application::AudioDetectionTask() {
         // Store the wake word data for voice recognition, like who is speaking
         StoreWakeWordData((uint8_t*)res->data, res->data_size);
 
-        if (res->wakeup_state == WAKENET_DETECTED) {
+        CheckTestButton();
+        if (chat_state_ == kChatStateTesting) {
+            auto& builtin_led = BuiltinLed::GetInstance();
+            if (res->vad_state == AFE_VAD_SPEECH) {
+                iovec iov = {
+                    .iov_base = heap_caps_malloc(res->data_size, MALLOC_CAP_SPIRAM),
+                    .iov_len = (size_t)res->data_size
+                };
+                memcpy(iov.iov_base, res->data, res->data_size);
+                test_pcm_.push_back(iov);
+                builtin_led.SetRed(128);
+            } else {
+                builtin_led.SetRed(32);
+            }
+            builtin_led.TurnOn();
+            continue;
+        }
+
+        if (chat_state_ == kChatStateIdle && res->wakeup_state == WAKENET_DETECTED) {
             xEventGroupClearBits(event_group_, DETECTION_RUNNING);
             SetChatState(kChatStateConnecting);
 
@@ -412,6 +493,15 @@ void Application::AudioCommunicationTask() {
         }
 
         if (chat_state_ == kChatStateListening) {
+            // Update the LED state based on the VAD state
+            auto& builtin_led = BuiltinLed::GetInstance();
+            if (res->vad_state == AFE_VAD_SPEECH) {
+                builtin_led.SetRed(128);
+            } else {
+                builtin_led.SetRed(32);
+            }
+            builtin_led.TurnOn();
+
             // Send audio data to server
             iovec data = {
                 .iov_base = malloc(res->data_size),
@@ -458,9 +548,9 @@ void Application::AudioDecodeTask() {
             }
 
             if (opus_decode_sample_rate_ != CONFIG_AUDIO_OUTPUT_SAMPLE_RATE) {
-                int target_size = frame_size * CONFIG_AUDIO_OUTPUT_SAMPLE_RATE / opus_decode_sample_rate_;
+                int target_size = test_resampler_.GetOutputSamples(frame_size);
                 std::vector<int16_t> resampled(target_size);
-                opus_resampler_.Process(packet->pcm.data(), frame_size, resampled.data(), target_size);
+                test_resampler_.Process(packet->pcm.data(), frame_size, resampled.data());
                 packet->pcm = std::move(resampled);
             }
         }

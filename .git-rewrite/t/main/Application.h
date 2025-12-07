@@ -27,7 +27,9 @@ enum ChatState {
     kChatStateConnecting,
     kChatStateListening,
     kChatStateSpeaking,
-    kChatStateWakeWordDetected
+    kChatStateWakeWordDetected,
+    kChatStateTesting,
+    kChatStateUpgrading
 };
 
 class Application {
@@ -76,6 +78,8 @@ private:
     int opus_duration_ms_ = 60;
     int opus_decode_sample_rate_ = CONFIG_AUDIO_OUTPUT_SAMPLE_RATE;
     OpusResampler opus_resampler_;
+    OpusResampler test_resampler_;
+    std::vector<iovec> test_pcm_;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t wake_word_encode_task_buffer_;
@@ -91,7 +95,10 @@ private:
     void StoreWakeWordData(uint8_t* data, size_t size);
     void EncodeWakeWordData();
     void SendWakeWordData();
-
+    void CheckTestButton();
+    void PlayTestAudio();
+    void CheckNewVersion();
+    
     void AudioFeedTask();
     void AudioDetectionTask();
     void AudioCommunicationTask();

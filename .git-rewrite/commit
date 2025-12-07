@@ -1,6 +1,6 @@
-tree 0744c1c67066c590e866bcc41a6e93b9da116414
-parent 8481c342d5b36b4ca0c0da7fe983aff1e6db5ce4
-author Terrence <terrence@tenclass.com> 1725955468 +0800
-committer Terrence <terrence@tenclass.com> 1725955468 +0800
+tree 4329bc3750e23b7c78e548d1ca4ed78189b5e831
+parent 47a7762b4c9e944bced489e545ab468a3d462110
+author Terrence <terrence@tenclass.com> 1726148927 +0800
+committer Terrence <terrence@tenclass.com> 1726148927 +0800
 
-update version to 0.2.0
+增加 RGB 灯亮的注意事项

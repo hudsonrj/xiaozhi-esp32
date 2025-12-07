@@ -33,6 +33,15 @@ config/config.yaml
 .google_keep_token.json
 *.token.json
 
+# Google Cloud Service Account Credentials
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!*.config.json
+!mcp_portal_transparencia/package.json
+!mcp_portal_transparencia/package-lock.json
+
 # Logs
 *.log
 bridge.log

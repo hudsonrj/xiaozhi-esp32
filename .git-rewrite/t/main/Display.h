@@ -5,6 +5,7 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <lvgl.h>
+#include <esp_timer.h>
 
 #include <string>
 
@@ -14,6 +15,9 @@ public:
     ~Display();
 
     void SetText(const std::string &text);
+    void ShowNotification(const std::string &text);
+
+    void UpdateDisplay();
 
 private:
     int sda_pin_;
@@ -24,7 +28,11 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     lv_disp_t *disp_ = nullptr;
+    lv_font_t *font_ = nullptr;
     lv_obj_t *label_ = nullptr;
+    lv_obj_t *notification_ = nullptr;
+    esp_timer_handle_t notification_timer_ = nullptr;
+    esp_timer_handle_t update_display_timer_ = nullptr;
 
     std::string text_;
 };

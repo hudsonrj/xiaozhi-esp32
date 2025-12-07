@@ -170,14 +170,73 @@ class MCPClient:
                 import shlex
                 if platform.system() == 'Windows':
                     # Windows: dividir comando em partes e executar
-                    # Se contém caminho relativo, já está no cwd correto
-                    parts = shlex.split(self.ssh_command, posix=False)
-                    cmd = parts
+                    clean_command = self.ssh_command
+                    
+                    # Detectar e corrigir caminhos duplicados de forma robusta
+                    import re
+                    # Padrão para detectar duplicação: C:\path\"C:\path\file.py
+                    # Ou: C:\path\C:\path\file.py (sem aspas intermediárias)
+                    duplicate_pattern1 = r'([A-Z]:[^"]+)"([A-Z]:[^"]+server\.py)'
+                    duplicate_pattern2 = r'([A-Z]:[^"]+)([A-Z]:[^"]+server\.py)'
+                    
+                    match1 = re.search(duplicate_pattern1, clean_command)
+                    match2 = re.search(duplicate_pattern2, clean_command)
+                    
+                    if match1 or match2:
+                        logger.warning("Caminho duplicado detectado no comando: %s", clean_command)
+                        # Encontrar TODOS os caminhos que terminam com server.py
+                        all_paths = re.findall(r'[A-Z]:[^"]*server\.py', clean_command)
+                        if all_paths:
+                            # Usar sempre o ÚLTIMO caminho encontrado (deve ser o correto)
+                            correct_path = all_paths[-1]
+                            # Determinar comando python
+                            python_cmd = 'python'
+                            if 'python3' in clean_command.lower():
+                                python_cmd = 'python3'
+                            # Reconstruir comando limpo SEM aspas duplicadas
+                            clean_command = f'{python_cmd} "{correct_path}"'
+                            logger.info("Comando corrigido: %s", clean_command)
+                    
+                    # Processar o comando - sempre extrair python e caminho manualmente
+                    python_match = re.search(r'(python3?)\s+"([^"]+server\.py)"', clean_command)
+                    if python_match:
+                        python_cmd = python_match.group(1)
+                        path = python_match.group(2)
+                        # Garantir que o caminho não está duplicado
+                        if path.count('C:') > 1:
+                            path_parts = re.findall(r'[A-Z]:[^"]*server\.py', path)
+                            if path_parts:
+                                path = path_parts[-1]
+                        cmd = [python_cmd, path]
+                        logger.debug("Comando processado manualmente: %s", cmd)
+                    else:
+                        # Tentar sem aspas
+                        python_match2 = re.search(r'(python3?)\s+([A-Z]:[^"]*server\.py)', clean_command)
+                        if python_match2:
+                            python_cmd = python_match2.group(1)
+                            path = python_match2.group(2)
+                            # Garantir que o caminho não está duplicado
+                            if path.count('C:') > 1:
+                                path_parts = re.findall(r'[A-Z]:[^"]*server\.py', path)
+                                if path_parts:
+                                    path = path_parts[-1]
+                            cmd = [python_cmd, path]
+                            logger.debug("Comando processado (sem aspas): %s", cmd)
+                        else:
+                            # Fallback: tentar shlex
+                            try:
+                                parts = shlex.split(clean_command, posix=False)
+                                cmd = parts
+                            except Exception as e:
+                                logger.warning("Erro ao processar comando com shlex: %s", e)
+                                # Último fallback: dividir por espaços
+                                cmd = clean_command.split()
                 else:
                     # Unix: executar via shell
                     cmd = ["/bin/bash", "-c", self.ssh_command]
                 
                 logger.info("Executando comando local: %s", self.ssh_command)
+                logger.debug("Comando processado: %s", cmd)
             else:
                 # Construir comando SSH para servidor remoto
                 ssh_cmd = [

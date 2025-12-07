@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from bridge import Bridge
 from bridge_multi import MultiMCPBridge
+from bridge_multi_ws import MultiWebSocketBridge
 
 
 def setup_logging(config: dict):
@@ -97,23 +98,141 @@ def main():
     logger.info("Xiaozhi MCP Bridge - Iniciando...")
     logger.info("=" * 60)
     
-    # Validar configuração
-    xiaozhi_config = config.get('xiaozhi', {})
-    
-    if not xiaozhi_config.get('websocket_url'):
-        logger.error("Configuração 'xiaozhi.websocket_url' não encontrada")
-        sys.exit(1)
-    
-    if not xiaozhi_config.get('token'):
-        logger.error("Configuração 'xiaozhi.token' não encontrada")
-        sys.exit(1)
+    # Verificar se há múltiplos endpoints WebSocket configurados
+    ws_endpoints_config = config.get('websocket_endpoints', [])
     
     # Verificar se há múltiplos servidores MCP configurados
     mcp_servers_config = config.get('mcp_servers', [])
     
-    if mcp_servers_config and len(mcp_servers_config) > 0:
-        # Usar MultiMCPBridge para múltiplos servidores
-        logger.info("Configuração multi-MCP detectada: %d servidores", len(mcp_servers_config))
+    # Se há múltiplos endpoints WebSocket, usar MultiWebSocketBridge
+    if ws_endpoints_config and len(ws_endpoints_config) > 0:
+        logger.info("Configuração multi-WebSocket detectada: %d endpoints", len(ws_endpoints_config))
+        
+        # Validar endpoints WebSocket
+        ws_endpoints = []
+        for idx, endpoint_config in enumerate(ws_endpoints_config):
+            ws_url = endpoint_config.get('url', '')
+            ws_token = endpoint_config.get('token', '')
+            
+            if not ws_url or not ws_token:
+                logger.error("Endpoint WebSocket %d está faltando 'url' ou 'token'", idx)
+                sys.exit(1)
+            
+            ws_endpoints.append({
+                'url': ws_url,
+                'token': ws_token
+            })
+            logger.info("Endpoint WebSocket %d configurado: %s", idx, ws_url.split("token=")[0] + "token=***")
+        
+        # Processar servidores MCP (mesma lógica)
+        if not mcp_servers_config or len(mcp_servers_config) == 0:
+            logger.error("Configuração 'mcp_servers' não encontrada ou vazia")
+            sys.exit(1)
+        
+        mcp_servers = []
+        for mcp_config in mcp_servers_config:
+            # Validar configuração de cada servidor
+            if not mcp_config.get('name'):
+                logger.error("Configuração 'name' não encontrada para servidor MCP")
+                sys.exit(1)
+            
+            # Determinar tipo de conexão (HTTP, SSH ou local)
+            if mcp_config.get('url'):
+                # Servidor HTTP/HTTPS
+                api_key = mcp_config.get('api_key', '')
+                headers = mcp_config.get('headers', {})
+                
+                if not api_key:
+                    logger.error("API key não encontrada para servidor MCP HTTP: %s", mcp_config.get('name'))
+                    sys.exit(1)
+                
+                if 'Authorization' not in headers:
+                    headers['Authorization'] = f'Bearer {api_key}'
+                
+                logger.info("Configurando servidor HTTP %s com API key: %s...", 
+                          mcp_config.get('name'), api_key[:10] if api_key else 'VAZIA')
+                
+                mcp_servers.append({
+                    'name': mcp_config['name'],
+                    'url': mcp_config['url'],
+                    'api_key': api_key,
+                    'headers': headers
+                })
+            elif mcp_config.get('ssh_host'):
+                # Servidor remoto via SSH
+                ssh_port = mcp_config.get('ssh_port', 22)
+                ssh_password = os.environ.get('SSH_PASSWORD') or mcp_config.get('ssh_password')
+                
+                if ssh_password:
+                    logger.info("Senha SSH encontrada para servidor %s: %d caracteres", 
+                              mcp_config.get('name'), len(ssh_password))
+                else:
+                    logger.warning("Senha SSH não encontrada para servidor %s (variável SSH_PASSWORD ou config.yaml)", 
+                                 mcp_config.get('name'))
+                
+                mcp_servers.append({
+                    'name': mcp_config['name'],
+                    'ssh_host': mcp_config['ssh_host'],
+                    'ssh_user': mcp_config.get('ssh_user', 'user'),
+                    'ssh_command': mcp_config.get('ssh_command', ''),
+                    'ssh_port': ssh_port,
+                    'ssh_password': ssh_password
+                })
+            elif mcp_config.get('local_command'):
+                # Servidor local (executar comando localmente)
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                local_cmd = mcp_config['local_command']
+                
+                # Converter caminho relativo para absoluto se necessário
+                if 'mcp_portal_transparencia' in local_cmd:
+                    portal_path = os.path.join(base_dir, 'mcp_portal_transparencia', 'server.js')
+                    local_cmd = local_cmd.replace('mcp_portal_transparencia/server.js', portal_path)
+                elif 'mcp_google_calendar' in local_cmd:
+                    calendar_path = os.path.join(base_dir, 'mcp_google_calendar', 'server.py')
+                    calendar_path = os.path.normpath(calendar_path)
+                    local_cmd = local_cmd.replace('mcp_google_calendar/server.py', calendar_path)
+                elif 'mcp_google_keep' in local_cmd:
+                    keep_path = os.path.join(base_dir, 'mcp_google_keep', 'server.py')
+                    keep_path = os.path.normpath(keep_path)
+                    local_cmd = local_cmd.replace('mcp_google_keep/server.py', keep_path)
+                elif 'mcp_notion' in local_cmd:
+                    notion_path = os.path.join(base_dir, 'mcp_notion', 'server.py')
+                    notion_path = os.path.normpath(notion_path)
+                    local_cmd = local_cmd.replace('mcp_notion/server.py', notion_path)
+                
+                mcp_servers.append({
+                    'name': mcp_config['name'],
+                    'ssh_host': 'localhost',
+                    'ssh_user': os.getenv('USER', os.getenv('USERNAME', 'user')),
+                    'ssh_command': local_cmd,
+                    'ssh_port': 22,
+                    'ssh_password': None
+                })
+            else:
+                logger.error("Servidor MCP '%s' deve ter 'url', 'ssh_host' ou 'local_command'", mcp_config.get('name'))
+                sys.exit(1)
+        
+        # Criar bridge multi-WebSocket
+        bridge = MultiWebSocketBridge(
+            ws_endpoints=ws_endpoints,
+            mcp_servers=mcp_servers
+        )
+    else:
+        # Modo compatibilidade: usar configuração antiga (xiaozhi.websocket_url e xiaozhi.token)
+        # Validar configuração
+        xiaozhi_config = config.get('xiaozhi', {})
+        
+        if not xiaozhi_config.get('websocket_url'):
+            logger.error("Configuração 'xiaozhi.websocket_url' não encontrada")
+            sys.exit(1)
+        
+        if not xiaozhi_config.get('token'):
+            logger.error("Configuração 'xiaozhi.token' não encontrada")
+            sys.exit(1)
+    
+        if mcp_servers_config and len(mcp_servers_config) > 0:
+            # Usar MultiMCPBridge para múltiplos servidores
+            logger.info("Configuração multi-MCP detectada: %d servidores", len(mcp_servers_config))
         
         mcp_servers = []
         for mcp_config in mcp_servers_config:
@@ -180,6 +299,27 @@ def main():
                     # Substituir caminho relativo por absoluto
                     portal_path = os.path.join(base_dir, 'mcp_portal_transparencia', 'server.js')
                     local_cmd = local_cmd.replace('mcp_portal_transparencia/server.js', portal_path)
+                elif 'mcp_google_calendar' in local_cmd:
+                    # Substituir caminho relativo por absoluto para Python
+                    calendar_path = os.path.join(base_dir, 'mcp_google_calendar', 'server.py')
+                    # Normalizar caminho (resolve problemas de barras no Windows)
+                    calendar_path = os.path.normpath(calendar_path)
+                    # Substituir o caminho relativo pelo absoluto (sem aspas extras)
+                    local_cmd = local_cmd.replace('mcp_google_calendar/server.py', calendar_path)
+                elif 'mcp_google_keep' in local_cmd:
+                    # Substituir caminho relativo por absoluto para Python
+                    keep_path = os.path.join(base_dir, 'mcp_google_keep', 'server.py')
+                    # Normalizar caminho (resolve problemas de barras no Windows)
+                    keep_path = os.path.normpath(keep_path)
+                    # Substituir o caminho relativo pelo absoluto (sem aspas extras)
+                    local_cmd = local_cmd.replace('mcp_google_keep/server.py', keep_path)
+                elif 'mcp_notion' in local_cmd:
+                    # Substituir caminho relativo por absoluto para Python
+                    notion_path = os.path.join(base_dir, 'mcp_notion', 'server.py')
+                    # Normalizar caminho (resolve problemas de barras no Windows)
+                    notion_path = os.path.normpath(notion_path)
+                    # Substituir o caminho relativo pelo absoluto (sem aspas extras)
+                    local_cmd = local_cmd.replace('mcp_notion/server.py', notion_path)
                 
                 mcp_servers.append({
                     'name': mcp_config['name'],
@@ -193,39 +333,39 @@ def main():
                 logger.error("Servidor MCP '%s' deve ter 'url', 'ssh_host' ou 'local_command'", mcp_config.get('name'))
                 sys.exit(1)
         
-        bridge = MultiMCPBridge(
-            ws_url=xiaozhi_config['websocket_url'],
-            ws_token=xiaozhi_config['token'],
-            mcp_servers=mcp_servers
-        )
-    else:
-        # Usar Bridge simples para um único servidor (compatibilidade)
-        mcp_config = config.get('mcp_local', {})
-        
-        if not mcp_config.get('ssh_host'):
-            logger.error("Configuração 'mcp_local.ssh_host' não encontrada")
-            sys.exit(1)
-        
-        if not mcp_config.get('ssh_user'):
-            logger.error("Configuração 'mcp_local.ssh_user' não encontrada")
-            sys.exit(1)
-        
-        if not mcp_config.get('ssh_command'):
-            logger.error("Configuração 'mcp_local.ssh_command' não encontrada")
-            sys.exit(1)
-        
-        ssh_port = mcp_config.get('ssh_port', 22)
-        ssh_password = os.environ.get('SSH_PASSWORD') or mcp_config.get('ssh_password')
-        
-        bridge = Bridge(
-            ws_url=xiaozhi_config['websocket_url'],
-            ws_token=xiaozhi_config['token'],
-            ssh_host=mcp_config['ssh_host'],
-            ssh_user=mcp_config['ssh_user'],
-            ssh_command=mcp_config['ssh_command'],
-            ssh_port=ssh_port,
-            ssh_password=ssh_password
-        )
+            bridge = MultiMCPBridge(
+                ws_url=xiaozhi_config['websocket_url'],
+                ws_token=xiaozhi_config['token'],
+                mcp_servers=mcp_servers
+            )
+        else:
+            # Usar Bridge simples para um único servidor (compatibilidade)
+            mcp_config = config.get('mcp_local', {})
+            
+            if not mcp_config.get('ssh_host'):
+                logger.error("Configuração 'mcp_local.ssh_host' não encontrada")
+                sys.exit(1)
+            
+            if not mcp_config.get('ssh_user'):
+                logger.error("Configuração 'mcp_local.ssh_user' não encontrada")
+                sys.exit(1)
+            
+            if not mcp_config.get('ssh_command'):
+                logger.error("Configuração 'mcp_local.ssh_command' não encontrada")
+                sys.exit(1)
+            
+            ssh_port = mcp_config.get('ssh_port', 22)
+            ssh_password = os.environ.get('SSH_PASSWORD') or mcp_config.get('ssh_password')
+            
+            bridge = Bridge(
+                ws_url=xiaozhi_config['websocket_url'],
+                ws_token=xiaozhi_config['token'],
+                ssh_host=mcp_config['ssh_host'],
+                ssh_user=mcp_config['ssh_user'],
+                ssh_command=mcp_config['ssh_command'],
+                ssh_port=ssh_port,
+                ssh_password=ssh_password
+            )
     
     # Executar bridge
     try:

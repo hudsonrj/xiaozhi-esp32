@@ -1,5 +1,5 @@
 """
-Bridge Multi-MCP que agrega ferramentas de múltiplos servidores MCP
+Bridge Multi-WebSocket que conecta múltiplos endpoints WebSocket aos mesmos servidores MCP
 """
 import asyncio
 import json
@@ -17,11 +17,28 @@ MAX_MESSAGE_SIZE = 50 * 1024  # 50KB
 MAX_CONTENT_LENGTH = 2000  # Máximo de caracteres por conteúdo de resultado
 
 
-class MultiMCPBridge:
-    """Bridge que conecta WebSocket (xiaozhi.me) e múltiplos servidores MCP locais"""
+class MultiWebSocketBridge:
+    """Bridge que conecta múltiplos WebSockets (xiaozhi.me) aos mesmos servidores MCP locais"""
     
-    def __init__(self, ws_url: str, ws_token: str, mcp_servers: List[Dict[str, Any]]):
-        self.ws_client = WebSocketClient(ws_url, ws_token)
+    def __init__(self, ws_endpoints: List[Dict[str, str]], mcp_servers: List[Dict[str, Any]]):
+        """
+        Args:
+            ws_endpoints: Lista de dicionários com 'url' e 'token' para cada endpoint WebSocket
+            mcp_servers: Lista de configurações de servidores MCP (compartilhados por todos os WebSockets)
+        """
+        # Criar clientes WebSocket para cada endpoint
+        self.ws_clients: List[WebSocketClient] = []
+        for idx, endpoint in enumerate(ws_endpoints):
+            ws_url = endpoint.get('url', '')
+            ws_token = endpoint.get('token', '')
+            if not ws_url or not ws_token:
+                logger.error("Endpoint WebSocket %d está faltando 'url' ou 'token'", idx)
+                continue
+            ws_client = WebSocketClient(ws_url, ws_token)
+            ws_client.endpoint_id = f"endpoint-{idx}"
+            self.ws_clients.append(ws_client)
+        
+        # Servidores MCP compartilhados por todos os WebSockets
         self.mcp_clients: List[Union[MCPClient, MCPClientHTTP]] = []
         self.message_handler = MessageHandler()
         self.running = False
@@ -50,15 +67,16 @@ class MultiMCPBridge:
             client.server_name = mcp_config.get('name', 'unknown')
             self.mcp_clients.append(client)
         
-        # Mapeamento de IDs de requisição (cloud_id -> (client_index, local_id))
-        self.id_mapping: Dict[Any, tuple] = {}
-        self.reverse_id_mapping: Dict[tuple, Any] = {}
+        # Mapeamento de IDs de requisição por WebSocket
+        # Estrutura: {ws_endpoint_id: {cloud_id -> (client_index, local_id)}}
+        self.id_mappings: Dict[str, Dict[Any, tuple]] = {}
+        self.reverse_id_mappings: Dict[str, Dict[tuple, Any]] = {}
         self._local_id_counter = 10000
         
-        # Cache de ferramentas agregadas
+        # Cache de ferramentas agregadas (compartilhado)
         self._aggregated_tools: Optional[List[Dict[str, Any]]] = None
         
-        # Cache de mapeamento nome -> ID de collections
+        # Cache de mapeamento nome -> ID de collections (compartilhado)
         self._collection_name_to_id: Dict[str, str] = {}
         
         # Configurar callbacks
@@ -66,53 +84,77 @@ class MultiMCPBridge:
     
     def _setup_callbacks(self):
         """Configura callbacks dos clientes"""
-        # WebSocket callbacks
-        self.ws_client.on_connected = self._on_ws_connected
-        self.ws_client.on_disconnected = self._on_ws_disconnected
-        self.ws_client.on_error = self._on_ws_error
-        self.ws_client.on_message = self._on_ws_message
+        # WebSocket callbacks (um para cada endpoint)
+        for ws_client in self.ws_clients:
+            endpoint_id = getattr(ws_client, 'endpoint_id', 'unknown')
+            
+            # Criar função factory para capturar endpoint_id corretamente
+            def create_message_handler(eid: str):
+                async def handler(msg):
+                    await self._on_ws_message(msg, eid)
+                return handler
+            
+            def create_connected_handler(eid: str):
+                def handler():
+                    self._on_ws_connected(eid)
+                return handler
+            
+            def create_disconnected_handler(eid: str):
+                def handler():
+                    self._on_ws_disconnected(eid)
+                return handler
+            
+            def create_error_handler(eid: str):
+                def handler(err: str):
+                    self._on_ws_error(err, eid)
+                return handler
+            
+            ws_client.on_connected = create_connected_handler(endpoint_id)
+            ws_client.on_disconnected = create_disconnected_handler(endpoint_id)
+            ws_client.on_error = create_error_handler(endpoint_id)
+            ws_client.on_message = create_message_handler(endpoint_id)
         
         # MCP callbacks (configurados dinamicamente)
         for idx, client in enumerate(self.mcp_clients):
             client.on_message = lambda msg, c_idx=idx: self._on_mcp_message(msg, c_idx)
             client.on_error = lambda err, c_idx=idx: self._on_mcp_error(err, c_idx)
     
-    def _on_ws_connected(self):
+    def _on_ws_connected(self, endpoint_id: str):
         """Callback quando WebSocket conecta"""
-        logger.info("WebSocket conectado")
+        logger.info("WebSocket conectado [%s]", endpoint_id)
     
-    def _on_ws_disconnected(self):
+    def _on_ws_disconnected(self, endpoint_id: str):
         """Callback quando WebSocket desconecta"""
-        logger.warning("WebSocket desconectado")
+        logger.warning("WebSocket desconectado [%s]", endpoint_id)
     
-    def _on_ws_error(self, error: str):
+    def _on_ws_error(self, error: str, endpoint_id: str):
         """Callback de erro do WebSocket"""
-        logger.error("Erro WebSocket: %s", error)
+        logger.error("Erro WebSocket [%s]: %s", endpoint_id, error)
     
     def _on_mcp_error(self, error: str, client_idx: int):
         """Callback de erro do MCP"""
         server_name = getattr(self.mcp_clients[client_idx], 'server_name', f'MCP-{client_idx}')
         logger.error("Erro MCP [%s]: %s", server_name, error)
     
-    async def _on_ws_message(self, payload: Dict[str, Any]):
+    async def _on_ws_message(self, payload: Dict[str, Any], endpoint_id: str):
         """Processa mensagem recebida do WebSocket (cloud)"""
         try:
             # Validar mensagem JSON-RPC
             if not self.message_handler.validate_jsonrpc(payload):
-                logger.warning("Mensagem JSON-RPC inválida do WebSocket: %s", payload)
+                logger.warning("Mensagem JSON-RPC inválida do WebSocket [%s]: %s", endpoint_id, payload)
                 return
             
             method = payload.get("method")
             
             # Interceptar tools/list para agregar ferramentas
             if method == "tools/list":
-                logger.info("[BUSCA] Interceptando tools/list do agente (id=%s)", payload.get("id"))
-                await self._handle_aggregated_tools_list(payload)
+                logger.info("[BUSCA] Interceptando tools/list do agente [%s] (id=%s)", endpoint_id, payload.get("id"))
+                await self._handle_aggregated_tools_list(payload, endpoint_id)
                 return
             
             # Interceptar tools/call para rotear para o servidor correto
             if method == "tools/call":
-                await self._handle_routed_tool_call(payload)
+                await self._handle_routed_tool_call(payload, endpoint_id)
                 return
             
             # Se é uma requisição, encaminhar para todos os servidores (ou apenas o primeiro)
@@ -121,46 +163,48 @@ class MultiMCPBridge:
                 local_id = self._get_next_local_id()
                 
                 # Por padrão, encaminhar para o primeiro servidor
-                # (pode ser melhorado para roteamento inteligente)
                 client_idx = 0
                 client = self.mcp_clients[client_idx]
                 
-                # Mapear IDs
-                self.id_mapping[cloud_id] = (client_idx, local_id)
-                self.reverse_id_mapping[(client_idx, local_id)] = cloud_id
+                # Mapear IDs (por endpoint)
+                if endpoint_id not in self.id_mappings:
+                    self.id_mappings[endpoint_id] = {}
+                    self.reverse_id_mappings[endpoint_id] = {}
+                
+                self.id_mappings[endpoint_id][cloud_id] = (client_idx, local_id)
+                self.reverse_id_mappings[endpoint_id][(client_idx, local_id)] = cloud_id
                 
                 # Criar nova mensagem com ID local
                 local_message = payload.copy()
                 local_message["id"] = local_id
                 
-                logger.debug("Proxy Cloud -> Local [%s]: %s (cloud_id=%s -> local_id=%s)",
+                logger.debug("Proxy Cloud -> Local [%s] [%s]: %s (cloud_id=%s -> local_id=%s)",
                            getattr(client, 'server_name', f'MCP-{client_idx}'),
-                           method, cloud_id, local_id)
+                           endpoint_id, method, cloud_id, local_id)
                 
                 # Enviar para MCP local e aguardar resposta
-                asyncio.create_task(self._forward_request_to_mcp(local_message, cloud_id, client_idx))
+                asyncio.create_task(self._forward_request_to_mcp(local_message, cloud_id, client_idx, endpoint_id))
             
             # Se é uma notificação, encaminhar para todos
             elif self.message_handler.is_notification(payload):
-                logger.debug("Proxy Cloud -> Local (notification): %s", method)
+                logger.debug("Proxy Cloud -> Local [%s] (notification): %s", endpoint_id, method)
                 for idx, client in enumerate(self.mcp_clients):
                     asyncio.create_task(self._forward_notification_to_mcp(payload, idx))
             
             # Se é uma resposta, não deveria acontecer
             else:
-                logger.warning("Resposta recebida do WebSocket (inesperado): %s", payload)
+                logger.warning("Resposta recebida do WebSocket [%s] (inesperado): %s", endpoint_id, payload)
                 
         except Exception as e:
-            logger.error("Erro ao processar mensagem do WebSocket: %s", e, exc_info=True)
+            logger.error("Erro ao processar mensagem do WebSocket [%s]: %s", endpoint_id, e, exc_info=True)
     
-    async def _handle_aggregated_tools_list(self, request: Dict[str, Any]):
+    async def _handle_aggregated_tools_list(self, request: Dict[str, Any], endpoint_id: str):
         """Agrega ferramentas de todos os servidores MCP"""
         try:
             cloud_id = request.get("id")
             
             # Sempre buscar ferramentas frescas (não usar cache)
-            # Isso garante que sempre temos as ferramentas mais atualizadas
-            logger.info("Buscando ferramentas de todos os servidores MCP...")
+            logger.info("Buscando ferramentas de todos os servidores MCP para [%s]...", endpoint_id)
             
             # Verificar se há pelo menos um servidor conectado
             connected_clients = [c for c in self.mcp_clients if c.connected]
@@ -173,7 +217,7 @@ class MultiMCPBridge:
                         "tools": []
                     }
                 }
-                await self._forward_response_to_cloud(response)
+                await self._forward_response_to_cloud(response, endpoint_id)
                 return
             
             # Buscar ferramentas de todos os servidores conectados
@@ -209,8 +253,6 @@ class MultiMCPBridge:
                         for tool in tools:
                             tool_name = tool.get("name", "")
                             # Só adicionar prefixo se não tiver já
-                            # Verificar se já começa com o prefixo do servidor ou prefixos conhecidos
-                            # IMPORTANTE: Para google-calendar e notion, as ferramentas já vêm com prefixo
                             if (not tool_name.startswith("portal_") and 
                                 not tool_name.startswith("sql_") and 
                                 not tool_name.startswith("aperag_") and
@@ -237,17 +279,17 @@ class MultiMCPBridge:
                 }
             }
             
-            logger.info("Total de ferramentas agregadas: %d", len(all_tools))
-            await self._forward_response_to_cloud(response)
+            logger.info("Total de ferramentas agregadas para [%s]: %d", endpoint_id, len(all_tools))
+            await self._forward_response_to_cloud(response, endpoint_id)
             
         except Exception as e:
-            logger.error("Erro ao agregar ferramentas: %s", e, exc_info=True)
+            logger.error("Erro ao agregar ferramentas [%s]: %s", endpoint_id, e, exc_info=True)
             error_response = self.message_handler.create_error_response(
                 request.get("id"), -32000, f"Erro ao agregar ferramentas: {str(e)}"
             )
-            await self._forward_response_to_cloud(error_response)
+            await self._forward_response_to_cloud(error_response, endpoint_id)
     
-    async def _handle_routed_tool_call(self, request: Dict[str, Any]):
+    async def _handle_routed_tool_call(self, request: Dict[str, Any], endpoint_id: str):
         """Roteia tools/call para o servidor correto baseado no nome da ferramenta"""
         try:
             cloud_id = request.get("id")
@@ -319,7 +361,7 @@ class MultiMCPBridge:
                 error_response = self.message_handler.create_error_response(
                     cloud_id, -32601, f"Servidor MCP não encontrado para ferramenta: {tool_name}"
                 )
-                await self._forward_response_to_cloud(error_response)
+                await self._forward_response_to_cloud(error_response, endpoint_id)
                 return
             
             client = self.mcp_clients[client_idx]
@@ -329,13 +371,17 @@ class MultiMCPBridge:
                 error_response = self.message_handler.create_error_response(
                     cloud_id, -32000, f"Servidor MCP {server_name} não está conectado"
                 )
-                await self._forward_response_to_cloud(error_response)
+                await self._forward_response_to_cloud(error_response, endpoint_id)
                 return
             
-            # Mapear IDs
+            # Mapear IDs (por endpoint)
+            if endpoint_id not in self.id_mappings:
+                self.id_mappings[endpoint_id] = {}
+                self.reverse_id_mappings[endpoint_id] = {}
+            
             local_id = self._get_next_local_id()
-            self.id_mapping[cloud_id] = (client_idx, local_id)
-            self.reverse_id_mapping[(client_idx, local_id)] = cloud_id
+            self.id_mappings[endpoint_id][cloud_id] = (client_idx, local_id)
+            self.reverse_id_mappings[endpoint_id][(client_idx, local_id)] = cloud_id
             
             # Criar mensagem local (deep copy para poder modificar)
             import copy
@@ -358,7 +404,6 @@ class MultiMCPBridge:
                     logger.debug("Removido prefixo duplicado: %s -> %s", original_tool_name, tool_name)
                 else:
                     # Não está duplicado, manter o nome original (já tem o prefixo correto)
-                    # IMPORTANTE: NÃO remover o prefixo, o servidor espera o nome completo
                     tool_name = tool_name
                     logger.debug("Mantido nome original para %s: %s", server_name_normalized, tool_name)
             else:
@@ -396,9 +441,6 @@ class MultiMCPBridge:
             logger.debug("Nome da ferramenta após processamento: '%s' (original: '%s', servidor: '%s')", 
                         tool_name, original_tool_name, server_name)
             
-            # NOTA: A API key do ApeRAG é passada apenas no header Authorization,
-            # não nos argumentos da ferramenta. O MCPClientHTTP já faz isso automaticamente.
-            
             # Se é uma busca em collection e o collection_id não começa com "col",
             # tentar converter nome para ID
             logger.debug("Verificando se tool_name '%s' requer conversão de collection_id", tool_name)
@@ -428,18 +470,18 @@ class MultiMCPBridge:
                 else:
                     logger.warning("collection_id não encontrado ou está vazio nos arguments")
             
-            logger.info("Roteando tools/call para %s: %s -> %s (cloud_id=%s -> local_id=%s)",
-                       server_name, original_tool_name, tool_name, cloud_id, local_id)
+            logger.info("Roteando tools/call para %s [%s]: %s -> %s (cloud_id=%s -> local_id=%s)",
+                       server_name, endpoint_id, original_tool_name, tool_name, cloud_id, local_id)
             
             # Encaminhar para o servidor correto
-            asyncio.create_task(self._forward_request_to_mcp(local_message, cloud_id, client_idx))
+            asyncio.create_task(self._forward_request_to_mcp(local_message, cloud_id, client_idx, endpoint_id))
             
         except Exception as e:
-            logger.error("Erro ao rotear tools/call: %s", e, exc_info=True)
+            logger.error("Erro ao rotear tools/call [%s]: %s", endpoint_id, e, exc_info=True)
             error_response = self.message_handler.create_error_response(
                 request.get("id"), -32000, f"Erro ao rotear chamada: {str(e)}"
             )
-            await self._forward_response_to_cloud(error_response)
+            await self._forward_response_to_cloud(error_response, endpoint_id)
     
     def _on_mcp_message(self, message: Dict[str, Any], client_idx: int):
         """Processa mensagem recebida do MCP local"""
@@ -451,35 +493,41 @@ class MultiMCPBridge:
             
             server_name = getattr(self.mcp_clients[client_idx], 'server_name', f'MCP-{client_idx}')
             
-            # Se é uma resposta, mapear ID de volta e enviar para cloud
+            # Se é uma resposta, mapear ID de volta e enviar para todos os WebSockets que têm essa requisição
             if self.message_handler.is_response(message):
                 local_id = message.get("id")
-                key = (client_idx, local_id)
-                cloud_id = self.reverse_id_mapping.get(key)
                 
-                if cloud_id is None:
+                # Procurar em todos os endpoints qual tem esse ID mapeado
+                for endpoint_id, reverse_mapping in self.reverse_id_mappings.items():
+                    key = (client_idx, local_id)
+                    cloud_id = reverse_mapping.get(key)
+                    
+                    if cloud_id is not None:
+                        # Criar mensagem com ID cloud
+                        cloud_message = message.copy()
+                        cloud_message["id"] = cloud_id
+                        
+                        # Remover do mapeamento
+                        if endpoint_id in self.id_mappings:
+                            del self.id_mappings[endpoint_id][cloud_id]
+                        del reverse_mapping[key]
+                        
+                        logger.debug("Proxy Local -> Cloud [%s] [%s]: resposta (local_id=%s -> cloud_id=%s)",
+                                   server_name, endpoint_id, local_id, cloud_id)
+                        
+                        # Enviar para cloud (apenas para o endpoint que fez a requisição)
+                        asyncio.create_task(self._forward_response_to_cloud(cloud_message, endpoint_id))
+                        break
+                else:
                     logger.warning("ID local não encontrado no mapeamento: %s (servidor: %s)", local_id, server_name)
-                    return
-                
-                # Criar mensagem com ID cloud
-                cloud_message = message.copy()
-                cloud_message["id"] = cloud_id
-                
-                # Remover do mapeamento
-                del self.id_mapping[cloud_id]
-                del self.reverse_id_mapping[key]
-                
-                logger.debug("Proxy Local -> Cloud [%s]: resposta (local_id=%s -> cloud_id=%s)",
-                           server_name, local_id, cloud_id)
-                
-                # Enviar para cloud
-                asyncio.create_task(self._forward_response_to_cloud(cloud_message))
             
-            # Se é uma notificação, encaminhar para cloud
+            # Se é uma notificação, encaminhar para todos os WebSockets
             elif self.message_handler.is_notification(message):
                 logger.debug("Proxy Local -> Cloud [%s] (notification): %s",
                            server_name, message.get("method"))
-                asyncio.create_task(self._forward_notification_to_cloud(message))
+                for ws_client in self.ws_clients:
+                    endpoint_id = getattr(ws_client, 'endpoint_id', 'unknown')
+                    asyncio.create_task(self._forward_notification_to_cloud(message, endpoint_id))
             
             # Se é uma requisição, não deveria acontecer
             else:
@@ -489,7 +537,7 @@ class MultiMCPBridge:
         except Exception as e:
             logger.error("Erro ao processar mensagem do MCP: %s", e, exc_info=True)
     
-    async def _forward_request_to_mcp(self, local_message: Dict[str, Any], cloud_id: Any, client_idx: int):
+    async def _forward_request_to_mcp(self, local_message: Dict[str, Any], cloud_id: Any, client_idx: int, endpoint_id: str):
         """Encaminha requisição do cloud para MCP local"""
         try:
             client = self.mcp_clients[client_idx]
@@ -499,30 +547,34 @@ class MultiMCPBridge:
                 # Mapear ID de volta
                 local_id = response.get("id")
                 key = (client_idx, local_id)
-                if key in self.reverse_id_mapping:
-                    cloud_id = self.reverse_id_mapping[key]
-                    cloud_response = response.copy()
-                    cloud_response["id"] = cloud_id
-                    
-                    # Remover do mapeamento
-                    del self.id_mapping[cloud_id]
-                    del self.reverse_id_mapping[key]
-                    
-                    # Enviar resposta para cloud
-                    await self._forward_response_to_cloud(cloud_response)
+                
+                if endpoint_id in self.reverse_id_mappings:
+                    reverse_mapping = self.reverse_id_mappings[endpoint_id]
+                    if key in reverse_mapping:
+                        cloud_id = reverse_mapping[key]
+                        cloud_response = response.copy()
+                        cloud_response["id"] = cloud_id
+                        
+                        # Remover do mapeamento
+                        if endpoint_id in self.id_mappings:
+                            del self.id_mappings[endpoint_id][cloud_id]
+                        del reverse_mapping[key]
+                        
+                        # Enviar resposta para cloud (apenas para o endpoint que fez a requisição)
+                        await self._forward_response_to_cloud(cloud_response, endpoint_id)
             else:
                 # Enviar erro para cloud
                 error_response = self.message_handler.create_error_response(
                     cloud_id, -32000, "Erro ao processar requisição no servidor MCP"
                 )
-                await self._forward_response_to_cloud(error_response)
+                await self._forward_response_to_cloud(error_response, endpoint_id)
                 
         except Exception as e:
             logger.error("Erro ao encaminhar requisição para MCP: %s", e)
             error_response = self.message_handler.create_error_response(
                 cloud_id, -32000, f"Erro interno: {str(e)}"
             )
-            await self._forward_response_to_cloud(error_response)
+            await self._forward_response_to_cloud(error_response, endpoint_id)
     
     async def _forward_notification_to_mcp(self, notification: Dict[str, Any], client_idx: int):
         """Encaminha notificação do cloud para MCP local"""
@@ -532,23 +584,45 @@ class MultiMCPBridge:
         except Exception as e:
             logger.error("Erro ao encaminhar notificação para MCP: %s", e)
     
-    async def _forward_response_to_cloud(self, response: Dict[str, Any]):
-        """Encaminha resposta do MCP local para cloud"""
+    async def _forward_response_to_cloud(self, response: Dict[str, Any], endpoint_id: str):
+        """Encaminha resposta do MCP local para cloud (endpoint específico)"""
         try:
+            # Encontrar o WebSocket client correto
+            ws_client = None
+            for ws in self.ws_clients:
+                if getattr(ws, 'endpoint_id', 'unknown') == endpoint_id:
+                    ws_client = ws
+                    break
+            
+            if not ws_client:
+                logger.error("WebSocket client não encontrado para endpoint_id: %s", endpoint_id)
+                return
+            
             # Truncar resposta se muito grande
             truncated_response = self._truncate_response(response)
-            await self.ws_client.send_message(truncated_response)
-            logger.debug("Resposta enviada para cloud: %s", truncated_response.get("id"))
+            await ws_client.send_message(truncated_response)
+            logger.debug("Resposta enviada para cloud [%s]: %s", endpoint_id, truncated_response.get("id"))
         except Exception as e:
-            logger.error("Erro ao encaminhar resposta para cloud: %s", e)
+            logger.error("Erro ao encaminhar resposta para cloud [%s]: %s", endpoint_id, e)
     
-    async def _forward_notification_to_cloud(self, notification: Dict[str, Any]):
-        """Encaminha notificação do MCP local para cloud"""
+    async def _forward_notification_to_cloud(self, notification: Dict[str, Any], endpoint_id: str):
+        """Encaminha notificação do MCP local para cloud (endpoint específico)"""
         try:
-            await self.ws_client.send_message(notification)
-            logger.debug("Notificação enviada para cloud: %s", notification.get("method"))
+            # Encontrar o WebSocket client correto
+            ws_client = None
+            for ws in self.ws_clients:
+                if getattr(ws, 'endpoint_id', 'unknown') == endpoint_id:
+                    ws_client = ws
+                    break
+            
+            if not ws_client:
+                logger.error("WebSocket client não encontrado para endpoint_id: %s", endpoint_id)
+                return
+            
+            await ws_client.send_message(notification)
+            logger.debug("Notificação enviada para cloud [%s]: %s", endpoint_id, notification.get("method"))
         except Exception as e:
-            logger.error("Erro ao encaminhar notificação para cloud: %s", e)
+            logger.error("Erro ao encaminhar notificação para cloud [%s]: %s", endpoint_id, e)
     
     def _get_next_local_id(self) -> int:
         """Gera próximo ID local"""
@@ -762,10 +836,11 @@ class MultiMCPBridge:
     
     async def start(self):
         """Inicia a bridge"""
-        logger.info("Iniciando Multi-MCP Bridge com %d servidores...", len(self.mcp_clients))
+        logger.info("Iniciando Multi-WebSocket Bridge com %d endpoints e %d servidores MCP...", 
+                   len(self.ws_clients), len(self.mcp_clients))
         self.running = True
         
-        # Conectar a todos os servidores MCP PRIMEIRO (antes do WebSocket)
+        # Conectar a todos os servidores MCP PRIMEIRO (antes dos WebSockets)
         # Isso garante que quando o agente solicitar tools/list, os servidores já estarão prontos
         for idx, client in enumerate(self.mcp_clients):
             server_name = getattr(client, 'server_name', f'MCP-{idx}')
@@ -791,27 +866,40 @@ class MultiMCPBridge:
             logger.error("Nenhum servidor MCP conectado")
             return False
         
-        # AGORA conectar ao WebSocket (depois que os servidores estão prontos)
-        ws_connected = await self.ws_client.connect()
-        if not ws_connected:
-            logger.error("Falha ao conectar ao WebSocket")
+        # AGORA conectar a todos os WebSockets (depois que os servidores estão prontos)
+        for ws_client in self.ws_clients:
+            endpoint_id = getattr(ws_client, 'endpoint_id', 'unknown')
+            logger.info("Conectando ao WebSocket [%s]...", endpoint_id)
+            ws_connected = await ws_client.connect()
+            if not ws_connected:
+                logger.error("Falha ao conectar ao WebSocket [%s]", endpoint_id)
+            else:
+                logger.info("WebSocket conectado [%s]", endpoint_id)
+        
+        # Verificar se pelo menos um WebSocket está conectado
+        ws_connected_count = sum(1 for ws in self.ws_clients if ws.is_connected())
+        if ws_connected_count == 0:
+            logger.error("Nenhum WebSocket conectado")
             return False
         
-        logger.info("Multi-MCP Bridge iniciada com sucesso (%d/%d servidores conectados)",
-                   connected_count, len(self.mcp_clients))
+        logger.info("Multi-WebSocket Bridge iniciada com sucesso (%d/%d WebSockets conectados, %d/%d servidores MCP conectados)",
+                   ws_connected_count, len(self.ws_clients), connected_count, len(self.mcp_clients))
         return True
     
     async def stop(self):
         """Para a bridge"""
-        logger.info("Parando Multi-MCP Bridge...")
+        logger.info("Parando Multi-WebSocket Bridge...")
         self.running = False
         
+        # Desconectar todos os WebSockets
+        for ws_client in self.ws_clients:
+            await ws_client.disconnect()
+        
+        # Desconectar todos os servidores MCP
         for client in self.mcp_clients:
             await client.disconnect()
         
-        await self.ws_client.disconnect()
-        
-        logger.info("Multi-MCP Bridge parada")
+        logger.info("Multi-WebSocket Bridge parada")
     
     async def run(self):
         """Executa a bridge até ser interrompida"""
@@ -823,9 +911,10 @@ class MultiMCPBridge:
             while self.running:
                 await asyncio.sleep(1)
                 
-                # Verificar conexões
-                if not self.ws_client.is_connected():
-                    pass  # WebSocket tem reconexão automática
+                # Verificar conexões WebSocket
+                for ws_client in self.ws_clients:
+                    if not ws_client.is_connected():
+                        pass  # WebSocket tem reconexão automática
                 
                 # Verificar reconexão de servidores MCP
                 for idx, client in enumerate(self.mcp_clients):

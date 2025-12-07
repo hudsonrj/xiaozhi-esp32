@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""
+Script para testar autenticação OAuth 2.0 do Google Calendar
+Força a abertura do navegador para autenticação
+"""
+import sys
+from pathlib import Path
+
+# Adicionar diretório ao path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from google_oauth_helper import get_oauth_credentials
+
+def main():
+    print("\n" + "=" * 70)
+    print("TESTE DE AUTENTICACAO GOOGLE CALENDAR - OAUTH 2.0")
+    print("=" * 70)
+    print("\nEste script vai:")
+    print("1. Abrir o navegador automaticamente")
+    print("2. Mostrar a URL de autorizacao (caso o navegador nao abra)")
+    print("3. Aguardar sua autorizacao")
+    print("4. Salvar o token para uso futuro")
+    print("\n" + "=" * 70 + "\n")
+    
+    # Escopos do Google Calendar
+    scopes = ['https://www.googleapis.com/auth/calendar']
+    
+    try:
+        print("Solicitando credenciais OAuth 2.0...\n")
+        credentials = get_oauth_credentials(scopes, service_name="google_calendar")
+        
+        if credentials:
+            print("\n" + "=" * 70)
+            print("[OK] Autenticacao bem-sucedida!")
+            print("=" * 70)
+            print(f"\nToken salvo em: .google_calendar_token.json")
+            print("\nAgora voce pode usar as ferramentas do Google Calendar no bridge.")
+            print("=" * 70 + "\n")
+        else:
+            print("\n[ERRO] Falha na autenticacao\n")
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        print("\n\n[AVISO] Autenticacao cancelada pelo usuario.\n")
+        sys.exit(1)
+    except Exception as e:
+        print("\n" + "=" * 70)
+        print("[ERRO] Erro durante autenticacao:")
+        print("=" * 70)
+        print(str(e))
+        print()
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+

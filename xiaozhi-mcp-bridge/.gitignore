@@ -27,6 +27,12 @@ wheels/
 config/config.yaml
 .env
 
+# Tokens OAuth 2.0
+.google_token.json
+.google_calendar_token.json
+.google_keep_token.json
+*.token.json
+
 # Logs
 *.log
 bridge.log

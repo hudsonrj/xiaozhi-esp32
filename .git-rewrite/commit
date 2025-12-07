@@ -1,6 +1,6 @@
-tree b7202cd92724fdca6bd548fa39ac0ed6d8775508
-parent 086cc1fac547be146c6042250ba9ff0945b25f67
-author Terrence <terrence@tenclass.com> 1727338746 +0800
-committer Terrence <terrence@tenclass.com> 1727338746 +0800
+tree 77a01df6004e4151966050443bdf30b17e996dda
+parent 98b60b920c2e070950265c5b394ff6ca0e248462
+author Terrence <terrence@tenclass.com> 1727908762 +0800
+committer Terrence <terrence@tenclass.com> 1727908762 +0800
 
-add more wake word packets
+reconstruct application

@@ -1,18 +1,15 @@
 #include "AudioDevice.h"
-#include "esp_log.h"
+#include <esp_log.h>
 #include <cstring>
 
 #define TAG "AudioDevice"
 
 AudioDevice::AudioDevice() {
-    audio_play_queue_ = xQueueCreate(100, sizeof(AudioPacket*));
 }
 
 AudioDevice::~AudioDevice() {
-    vQueueDelete(audio_play_queue_);
-
-    if (audio_play_task_ != nullptr) {
-        vTaskDelete(audio_play_task_);
+    if (audio_input_task_ != nullptr) {
+        vTaskDelete(audio_input_task_);
     }
     if (rx_handle_ != nullptr) {
         ESP_ERROR_CHECK(i2s_channel_disable(rx_handle_));
@@ -37,8 +34,8 @@ void AudioDevice::Start(int input_sample_rate, int output_sample_rate) {
 
     xTaskCreate([](void* arg) {
         auto audio_device = (AudioDevice*)arg;
-        audio_device->AudioPlayTask();
-    }, "audio_play", 4096 * 4, this, 5, &audio_play_task_);
+        audio_device->InputTask();
+    }, "audio_input", 4096 * 2, this, 5, &audio_input_task_);
 }
 
 void AudioDevice::CreateDuplexChannels() {
@@ -76,10 +73,10 @@ void AudioDevice::CreateDuplexChannels() {
         },
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
-            .bclk = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_BCLK,
-            .ws = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_WS,
-            .dout = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_DOUT,
-            .din = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_DIN,
+            .bclk = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_MIC_GPIO_BCLK,
+            .ws = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_MIC_GPIO_WS,
+            .dout = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_SPK_GPIO_DOUT,
+            .din = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_MIC_GPIO_DIN,
             .invert_flags = {
                 .mclk_inv = false,
                 .bclk_inv = false,
@@ -127,9 +124,9 @@ void AudioDevice::CreateSimplexChannels() {
         },
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
-            .bclk = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_BCLK,
-            .ws = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_WS,
-            .dout = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_DOUT,
+            .bclk = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_SPK_GPIO_BCLK,
+            .ws = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_SPK_GPIO_WS,
+            .dout = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_SPK_GPIO_DOUT,
             .din = I2S_GPIO_UNUSED,
             .invert_flags = {
                 .mclk_inv = false,
@@ -147,7 +144,7 @@ void AudioDevice::CreateSimplexChannels() {
     std_cfg.gpio_cfg.bclk = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_MIC_GPIO_BCLK;
     std_cfg.gpio_cfg.ws = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_MIC_GPIO_WS;
     std_cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
-    std_cfg.gpio_cfg.din = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_GPIO_DIN;
+    std_cfg.gpio_cfg.din = (gpio_num_t)CONFIG_AUDIO_DEVICE_I2S_MIC_GPIO_DIN;
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &std_cfg));
     ESP_LOGI(TAG, "Simplex channels created");
 }
@@ -180,58 +177,22 @@ int AudioDevice::Read(int16_t* dest, int samples) {
     return samples;
 }
 
-void AudioDevice::QueueAudioPacket(AudioPacket* packet) {
-    xQueueSend(audio_play_queue_, &packet, portMAX_DELAY);
+void AudioDevice::OnInputData(std::function<void(const int16_t*, int)> callback) {
+    on_input_data_ = callback;
 }
 
-void AudioDevice::AudioPlayTask() {
+void AudioDevice::OutputData(std::vector<int16_t>& data) {
+    Write(data.data(), data.size());
+}
+
+void AudioDevice::InputTask() {
+    int duration = 30;
+    int input_frame_size = input_sample_rate_ / 1000 * duration;
+    int16_t input_buffer[input_frame_size];
     while (true) {
-        AudioPacket* packet;
-        xQueueReceive(audio_play_queue_, &packet, portMAX_DELAY);
-
-        switch (packet->type)
-        {
-        case kAudioPacketTypeStart:
-            playing_ = true;
-            breaked_ = false;
-            if (on_state_changed_) {
-                on_state_changed_();
-            }
-            break;
-        case kAudioPacketTypeStop:
-            playing_ = false;
-            if (on_state_changed_) {
-                on_state_changed_();
-            }
-            break;
-        case kAudioPacketTypeSentenceStart:
-            ESP_LOGI(TAG, "<< %s", packet->text.c_str());
-            break;
-        case kAudioPacketTypeSentenceEnd:
-            if (breaked_) { // Clear the queue
-                AudioPacket* p;
-                while (xQueueReceive(audio_play_queue_, &p, 0) == pdTRUE) {
-                    delete p;
-                }
-                breaked_ = false;
-                playing_ = false;
-            }
-            break;
-        case kAudioPacketTypeData:
-            Write(packet->pcm.data(), packet->pcm.size());
-            last_timestamp_ = packet->timestamp;
-            break;
-        default:
-            ESP_LOGE(TAG, "Unknown audio packet type: %d", packet->type);
+        int samples = Read(input_buffer, input_frame_size);
+        if (samples > 0) {
+            on_input_data_(input_buffer, samples);
         }
-        delete packet;
     }
-}
-
-void AudioDevice::OnStateChanged(std::function<void()> callback) {
-    on_state_changed_ = callback;
-}
-
-void AudioDevice::Break() {
-    breaked_ = true;
 }

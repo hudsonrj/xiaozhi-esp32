@@ -1,11 +1,10 @@
 #ifndef _APPLICATION_H_
 #define _APPLICATION_H_
 
-#include "WifiStation.h"
 #include "AudioDevice.h"
 #include "OpusEncoder.h"
+#include "OpusResampler.h"
 #include "WebSocketClient.h"
-#include "BuiltinLed.h"
 #include "FirmwareUpgrade.h"
 
 #include "opus.h"
@@ -33,14 +32,22 @@ enum ChatState {
 
 class Application {
 public:
-    Application();
-    ~Application();
+    static Application& GetInstance() {
+        static Application instance;
+        return instance;
+    }
+
     void Start();
 
+    // 删除拷贝构造函数和赋值运算符
+    Application(const Application&) = delete;
+    Application& operator=(const Application&) = delete;
+
 private:
-    WifiStation wifi_station_;
+    Application();
+    ~Application();
+
     AudioDevice audio_device_;
-    BuiltinLed builtin_led_;
     FirmwareUpgrade firmware_upgrade_;
 
     std::recursive_mutex mutex_;
@@ -68,7 +75,7 @@ private:
 
     int opus_duration_ms_ = 60;
     int opus_decode_sample_rate_ = CONFIG_AUDIO_OUTPUT_SAMPLE_RATE;
-    silk_resampler_state_struct resampler_state_;
+    OpusResampler opus_resampler_;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t wake_word_encode_task_buffer_;

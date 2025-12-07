@@ -1,6 +1,6 @@
-tree 670bb2eed6360e8ada212d8bca14b81ff90ba368
-parent eecd255bab636c596b79d2c1d5f48d18fec4c64c
-author Terrence <terrence@tenclass.com> 1725619831 +0800
-committer Terrence <terrence@tenclass.com> 1725619831 +0800
+tree 0744c1c67066c590e866bcc41a6e93b9da116414
+parent 8481c342d5b36b4ca0c0da7fe983aff1e6db5ce4
+author Terrence <terrence@tenclass.com> 1725955468 +0800
+committer Terrence <terrence@tenclass.com> 1725955468 +0800
 
-fix ota post field
+update version to 0.2.0

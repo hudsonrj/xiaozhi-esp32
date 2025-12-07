@@ -1,11 +1,5 @@
 menu "Xiaozhi Assistant"
 
-config OTA_UPGRADE_URL
-    string "OTA Upgrade URL"
-    default "https://"
-    help
-        The application will access this URL to check for updates when it starts and every 24 hours.
-
 config WEBSOCKET_URL
     string "Websocket URL"
     default "wss://"
@@ -17,13 +11,6 @@ config WEBSOCKET_ACCESS_TOKEN
     default ""
     help
         Access token for websocket communication.
-
-
-config BUILTIN_LED_GPIO
-    int "Builtin LED GPIO"
-    default 48
-    help
-        GPIO number of the builtin LED.
 
 config AUDIO_INPUT_SAMPLE_RATE
     int "Audio Input Sample Rate"
@@ -63,7 +50,7 @@ config AUDIO_DEVICE_I2S_GPIO_DIN
     
 config AUDIO_DEVICE_I2S_SIMPLEX
     bool "I2S Simplex"
-    default n
+    default y
     help
         Enable I2S Simplex mode.
     

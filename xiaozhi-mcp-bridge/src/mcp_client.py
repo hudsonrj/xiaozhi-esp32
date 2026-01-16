@@ -460,8 +460,8 @@ class MCPClient:
             # Se é requisição, aguardar resposta
             if future:
                 try:
-                    # Aumentar timeout para 60 segundos (servidores remotos podem demorar mais)
-                    response = await asyncio.wait_for(future, timeout=60.0)
+                    # Aumentar timeout para 180 segundos (modelos de IA podem demorar mais)
+                    response = await asyncio.wait_for(future, timeout=180.0)
                     return response
                 except asyncio.TimeoutError:
                     logger.error("Timeout aguardando resposta do servidor MCP (60s)")
@@ -543,4 +543,3 @@ class MCPClient:
                 logger.error("Erro ao finalizar processo SSH: %s", e)
         
         logger.info("Desconectado do servidor MCP")
-
